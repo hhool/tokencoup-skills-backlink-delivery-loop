@@ -61,10 +61,37 @@ class ServerTest(unittest.TestCase):
         (base / "drafts" / "example.com.eml").write_text(EML)
         (base / "records").mkdir()
         self.base = base
+        # A real config with the repo's templates and a temp prose dir, so the
+        # /import chain runs end to end without touching the repo's data/.
+        import os
+
+        repo = Path(__file__).resolve().parent.parent
+        prose = base / "prose"
+        prose.mkdir()
+        (prose / "todo.md").write_text(
+            "# TODO\n\n## B-1 mail + form track\n\n"
+            "| Target | Landing page | Entry |\n|---|---|---|\n"
+            "| example.com | /boards.html | editor@example.com |\n"
+            "| new-site.net | /boards.html | hi@new-site.net |\n",
+            encoding="utf-8",
+        )
+        from bdl.config import Config
+
+        self.cfg = Config.from_env({
+            "BDL_HOME": str(repo),
+            "BDL_CENTER_DOMAIN": "soundbuttons.cc",
+            "BDL_FROM_EMAIL": "hello@soundbuttons.cc",
+            "BDL_RECORDS_DIR": str(base / "records"),
+            "BDL_OUT_DIR": str(base / "out"),
+            "BDL_PROSE_DIR": str(prose),
+        })
         self.url, self.server = serve(
             manifest_path=str(base / "manifest"),
             drafts_dir=str(base / "drafts"),
             records_dir=str(base / "records"),
+            prose_dir=str(prose),
+            cfg=self.cfg,
+            workdir=str(base / "workdir"),
             port=0,
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -151,3 +178,83 @@ class ServerTest(unittest.TestCase):
                             str(self.base / "records"))
         projected = state.projected()
         self.assertEqual(projected[("example.com", "email")]["state"], "queued")
+
+    def _upload(self, csv_text, center=""):
+        boundary = "bdltestboundary"
+        parts = []
+        if center:
+            parts.append(
+                "--%s\r\nContent-Disposition: form-data; name=\"center_domain\"\r\n\r\n%s\r\n"
+                % (boundary, center).encode("utf-8")
+            )
+        parts.append(
+            ("--%s\r\nContent-Disposition: form-data; name=\"csv\"; filename=\"prospects.csv\"\r\n"
+             "Content-Type: text/csv\r\n\r\n" % boundary).encode("utf-8")
+            + csv_text.encode("utf-8") + b"\r\n"
+        )
+        parts.append(("--%s--\r\n" % boundary).encode("utf-8"))
+        body = b"".join(parts)
+        request = urllib.request.Request(
+            self.url.rstrip("/") + "/import",
+            data=body, method="POST",
+            headers={"Content-Type": "multipart/form-data; boundary=%s" % boundary},
+        )
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                return None
+
+        opener = urllib.request.build_opener(NoRedirect)
+        try:
+            with opener.open(request, timeout=15) as r:
+                return r.status, dict(r.headers)
+        except urllib.error.HTTPError as exc:
+            return exc.code, dict(exc.headers)
+
+CSV = (
+    "domain,url,type_key,priority,http_status,valid,already_have,is_competitor,is_gap\n"
+    "example.com,https://example.com,resource,3,200,true,false,false,true\n"
+    "new-site.net,https://new-site.net,resource,3,200,true,false,false,true\n"
+    "rival.com,https://rival.com,partner,2,200,true,false,true,false\n"
+    "absent.org,https://absent.org,resource,3,200,true,false,false,true\n"
+)
+
+class ImportChainTest(ServerTest):
+    """The CSV upload -> snapshot -> manifest -> drafts chain."""
+
+    def test_import_builds_a_manifest_and_drafts(self):
+        status, headers = self._upload(CSV)
+        self.assertEqual(status, 303)
+        location = headers.get("Location", "")
+        self.assertIn("flash", location)
+        # The dashboard now shows the imported batch.
+        status, markup = self._get("/")
+        self.assertIn("new-site.net", markup)
+        self.assertIn("rival.com", markup)
+        # The prose contacts turned two rows into emailable drafts.
+        drafts = self.base / "workdir" / "drafts"
+        self.assertTrue((drafts / "example.com.eml").is_file())
+        self.assertTrue((drafts / "new-site.net.eml").is_file())
+        body = (drafts / "example.com.eml").read_text(encoding="utf-8")
+        self.assertIn("editor@example.com", body)
+
+    def test_import_is_idempotent_per_upload_and_keeps_the_ledger(self):
+        self._upload(CSV)
+        self._upload(CSV)
+        # Two runs, two manifest batches, and no transmission of anything.
+        outs = list((self.base / "workdir" / "out").iterdir())
+        self.assertEqual(len(outs), 2)
+        self.assertFalse((self.base / "records" / "events-soundbuttons.cc.jsonl").exists())
+
+    def test_import_refuses_a_csv_without_a_domain_column(self):
+        status, headers = self._upload("nope,not,a,csv\n1,2,3,4\n")
+        self.assertEqual(status, 303)
+        self.assertIn("error", headers.get("Location", ""))
+        # The old dashboard state is untouched.
+        status, markup = self._get("/")
+        self.assertIn("form.org", markup)
+
+    def test_import_page_renders(self):
+        status, markup = self._get("/import")
+        self.assertEqual(status, 200)
+        self.assertIn("import-prospects", markup)

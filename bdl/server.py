@@ -1,28 +1,38 @@
 """Local review server: the human gate of the delivery loop, in a browser.
 
-Everything here is read-only except one endpoint: POST /record. That endpoint
-does exactly what `bdl record` does on the command line - build one validated
-event and append it to the log - so a click in this UI is an operator action,
-not an automation. The server binds 127.0.0.1 only and never sends mail,
-never submits a form and never marks a link live: those stay with the
-provider poll, the form flow and the L4 observer.
+Everything here is read-only except two endpoints. POST /record does exactly
+what `bdl record` does on the command line - build one validated event and
+append it to the log. POST /import does exactly what `import-prospects` +
+`build-manifest` + `draft` do - turn an uploaded prospector CSV into drafts.
+Both are operator actions a human clicked, never an automation. The server
+binds 127.0.0.1 only and never sends mail, never submits a form and never
+marks a link live: those stay with the provider poll, the form flow and the
+L4 observer.
 """
 
 from __future__ import annotations
 
 import html
+import email as email_lib
+import email.policy as email_policy
 import json
+from dataclasses import fields as dataclass_fields
+from dataclasses import replace
 from email import message_from_string
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
+from .adapters.csv_import import import_csv
 from .adapters.events import append_event, load_events
 from .errors import DeliveryError
-from .models import normalize_domain
+from .log import JsonLogger, new_batch_id
+from .models import ManifestRow, normalize_domain
+from .services.pipeline import build_manifest
 from .services.record import build_event
 from .services.state import project
+from .templates import TemplateSet
 
 STATUS_ORDER = (
     "ready_to_submit", "ready_for_review", "needs_enrichment",
@@ -106,7 +116,7 @@ def _packs_index(packs_dir: str | Path) -> List[Dict[str, str]]:
 
 
 class ReviewState:
-    """Everything the handler needs, loaded once at boot."""
+    """Everything the handler needs; mutable, so /import can swap the batch."""
 
     def __init__(
         self,
@@ -115,17 +125,32 @@ class ReviewState:
         records_dir: str,
         packs_dir: str = "",
         center_domain: str = "",
+        prose_dir: str = "",
+        cfg: Any = None,
+        workdir: str = "",
     ) -> None:
         self.manifest_path = str(manifest_path)
         self.drafts_dir = str(drafts_dir)
         self.records_dir = str(records_dir)
         self.packs_dir = str(packs_dir)
+        self.prose_dir = str(prose_dir)
+        self.cfg = cfg
+        self.workdir = str(workdir) or str(Path(records_dir).parent / "workdir")
         self.manifest = _read_manifest(manifest_path)
         self.center = normalize_domain(
             center_domain or self.manifest.get("center_domain") or ""
         )
 
-    # -- projections ---------------------------------------------------------
+    def switch(self, manifest_path: str, drafts_dir: str) -> None:
+        """Point the live dashboard at a freshly imported batch."""
+        self.manifest_path = str(manifest_path)
+        self.drafts_dir = str(drafts_dir)
+        self.manifest = _read_manifest(manifest_path)
+        center = normalize_domain(str(self.manifest.get("center_domain") or ""))
+        if center:
+            self.center = center
+
+    # -- projection ---------------------------------------------------------
 
     def rows(self) -> List[Dict[str, Any]]:
         rows = []
@@ -178,6 +203,96 @@ class ReviewState:
         path = records / ("events-%s.jsonl" % (event["center_domain"] or "unknown"))
         _, appended = append_event(path, event)
         return {"event": event, "appended": appended, "path": str(path)}
+
+    # -- the CSV upload chain ----------------------------------------------
+
+    def import_and_build(
+        self, filename: str, csv_bytes: bytes, center_domain: str = ""
+    ) -> Dict[str, Any]:
+        """The upload chain: import CSV -> snapshot -> manifest -> drafts.
+
+        Each stage is the same adapter/service the CLI uses. Nothing here
+        transmits; the drafts land in the dashboard awaiting a human.
+        """
+        if not csv_bytes:
+            raise DeliveryError("The upload was empty", hint="choose a prospect CSV file")
+        workdir = Path(self.workdir)
+        stamp = new_batch_id()
+        uploads = workdir / "uploads"
+        uploads.mkdir(parents=True, exist_ok=True)
+        safe_name = Path(filename or "prospects.csv").name or "prospects.csv"
+        csv_path = uploads / ("%s-%s" % (stamp, safe_name))
+        csv_path.write_bytes(csv_bytes)
+
+        diagnostics: Dict[str, Any] = {}
+        snapshot = import_csv(
+            str(csv_path), (center_domain or self.center or "").strip(), diagnostics=diagnostics,
+        )
+        center = str(snapshot["center_domain"])
+        snapshots = workdir / "snapshots"
+        snapshots.mkdir(parents=True, exist_ok=True)
+        snap_path = snapshots / ("%s.snapshot.json" % stamp)
+        snap_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        if self.cfg is None:
+            raise DeliveryError(
+                "The server was started without a config; the import chain needs one",
+                hint="start with `delivery serve`, which loads BDL_* env and .env",
+            )
+        cfg = replace(self.cfg, center_domain=center)
+        if not cfg.own_site_base:
+            cfg = replace(cfg, own_site_base="https://" + center)
+
+        batch_id = new_batch_id()
+        out_dir = workdir / "out" / batch_id
+        manifest = build_manifest(
+            cfg=cfg,
+            snapshot_path=str(snap_path),
+            prose_dir=self.prose_dir,
+            history_sources=[],
+            out_dir=str(out_dir),
+            batch_id=batch_id,
+            logger=JsonLogger(batch_id),
+        )
+        manifest_path = out_dir / "delivery-manifest.json"
+
+        drafted = 0
+        skipped = 0
+        draft_note = ""
+        if self.cfg.from_email:
+            from .services.draft import draft_batch
+
+            rows = [
+                ManifestRow(**{key: value for key, value in item.items() if key in {
+                    field.name for field in dataclass_fields(ManifestRow)}})
+                for item in manifest.get("rows", []) if isinstance(item, dict)
+            ]
+            report = draft_batch(
+                rows,
+                templates=TemplateSet.load(cfg.templates_dir, center),
+                center_domain=center,
+                own_site_base=cfg.own_site_base,
+                from_addr=self.cfg.from_email,
+                out_dir=str(workdir / "drafts"),
+                from_name=self.cfg.from_name,
+            )
+            drafted = int(report["counts"]["drafted"])
+            skipped = len(report.get("skips") or [])
+        else:
+            draft_note = "no BDL_FROM_EMAIL set, so drafts were not written; the manifest is ready"
+
+        self.switch(manifest_path, workdir / "drafts")
+        return {
+            "batch_id": batch_id,
+            "center_domain": center,
+            "prospects": diagnostics.get("prospects"),
+            "collapsed": diagnostics.get("collapsed_duplicates"),
+            "manifest": manifest.get("summary", {}),
+            "drafted": drafted,
+            "skipped": skipped,
+            "draft_note": draft_note,
+            "manifest_path": str(manifest_path),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +360,10 @@ def _record_form(
 
 
 def render_dashboard(state: ReviewState, flash: str = "", error: str = "") -> str:
-    parts: List[str] = ["<h1>Delivery review - %s</h1>" % _esc(state.center)]
+    parts: List[str] = [
+        "<h1>Delivery review - %s</h1>" % _esc(state.center),
+        "<p><a href='/import'>Import a prospect CSV &rarr;</a></p>",
+    ]
     if flash:
         parts.append("<div class='flash'>%s</div>" % _esc(flash))
     if error:
@@ -344,6 +462,35 @@ def render_dashboard(state: ReviewState, flash: str = "", error: str = "") -> st
     return _page("Delivery review", "".join(parts))
 
 
+def render_import_page(state: ReviewState) -> str:
+    prose = _esc(state.prose_dir or "(none)")
+    from_email = _esc(getattr(state.cfg, "from_email", "") or "(not set)")
+    body = [
+        "<p><a href='/'>&larr; back to review</a></p>",
+        "<h1>Import a prospect CSV</h1>",
+        "<p class='muted'>The chain a run of the CLI would do, in one click: "
+        "<code>import-prospects</code> &rarr; <code>build-manifest</code> &rarr; "
+        "<code>draft</code>. Nothing is sent; drafts land on the dashboard "
+        "awaiting your review.</p>",
+        "<form method='post' action='/import' enctype='multipart/form-data'>",
+        "<p><input type='file' name='csv' accept='.csv' required></p>",
+        "<p><label>centre domain "
+        "<input name='center_domain' value='%s' size='30'></label> "
+        "<span class='muted'>blank = %s or the file name</span></p>"
+        % (_esc(state.center), _esc(state.center or "guessed")),
+        "<p><button type='submit'>Import &amp; build</button></p>",
+        "</form>",
+        "<h2>What the manifest will use</h2>",
+        "<ul><li class='muted'>prose contacts: %s</li>"
+        "<li class='muted'>from address: %s</li></ul>" % (prose, from_email),
+        "<p class='muted'>Column contract: <code>domain</code> required; also read: "
+        "<code>url, type_key, priority, http_status, valid, already_have, "
+        "is_competitor, is_gap, note, note_en</code>. Other columns are reported "
+        "as dropped.</p>",
+    ]
+    return _page("Import CSV", "".join(body))
+
+
 def render_draft(state: ReviewState, domain: str) -> str:
     draft = _draft_info(state.drafts_dir, domain)
     if not draft:
@@ -398,6 +545,30 @@ class ReviewHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length).decode("utf-8") if length else ""
         return {key: values[0] for key, values in parse_qs(raw, keep_blank_values=True).items()}
 
+    def _multipart(self) -> Tuple[Dict[str, str], Dict[str, Tuple[str, bytes]]]:
+        """Parse multipart/form-data with the stdlib email parser."""
+        ctype = self.headers.get("Content-Type") or ""
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        # policy=default gives EmailMessage with iter_parts(); the compat32
+        # default policy would hand back a plain Message without it.
+        message = email_lib.message_from_bytes(
+            b"Content-Type: " + ctype.encode("utf-8")
+            + b"\r\nMIME-Version: 1.0\r\n\r\n" + body,
+            policy=email_policy.default,
+        )
+        fields: Dict[str, str] = {}
+        files: Dict[str, Tuple[str, bytes]] = {}
+        for part in message.iter_parts():
+            name = part.get_param("name", header="content-disposition") or ""
+            filename = part.get_filename()
+            payload = part.get_payload(decode=True) or b""
+            if filename is not None:
+                files[name] = (filename, payload)
+            else:
+                fields[name] = payload.decode("utf-8", "replace")
+        return fields, files
+
     def do_GET(self) -> None:
         parts = urlsplit(self.path)
         query = {k: v[0] for k, v in parse_qs(parts.query).items()}
@@ -406,6 +577,9 @@ class ReviewHandler(BaseHTTPRequestHandler):
             self._send_html(render_dashboard(
                 self.state, flash=query.get("flash", ""), error=query.get("error", ""),
             ))
+            return
+        if path == "/import":
+            self._send_html(render_import_page(self.state))
             return
         if path == "/favicon.ico":
             self._send_html("", 204)
@@ -450,7 +624,39 @@ class ReviewHandler(BaseHTTPRequestHandler):
         self._send_html(_page("Not found", "<h1>404</h1>"), 404)
 
     def do_POST(self) -> None:
-        if urlsplit(self.path).path != "/record":
+        path = urlsplit(self.path).path
+        if path == "/import":
+            fields, files = self._multipart()
+            try:
+                if "csv" not in files:
+                    raise DeliveryError(
+                        "No CSV file in the upload", hint="the file field must be named 'csv'",
+                    )
+                filename, payload = files["csv"]
+                report = self.state.import_and_build(
+                    filename, payload, fields.get("center_domain", ""),
+                )
+                summary = report["manifest"].get("by_status") or report["manifest"]
+                flash = (
+                    "Imported %(prospects)s prospect(s) for %(center)s; manifest: "
+                    "%(ready)s ready / %(blocked)s blocked / %(no_channel)s no-channel"
+                    % {"prospects": report.get("prospects"), "center": report["center_domain"],
+                       "ready": summary.get("ready_to_submit", 0),
+                       "blocked": summary.get("blocked", 0),
+                       "no_channel": summary.get("no_channel", 0)}
+                )
+                if report.get("drafted"):
+                    flash += "; %s draft(s) written, review before sending" % report["drafted"]
+                elif report.get("draft_note"):
+                    flash += "; " + report["draft_note"]
+                self._redirect({"flash": flash})
+            except DeliveryError as exc:
+                detail = exc.to_dict()
+                self._redirect({"error": json.dumps(detail, ensure_ascii=False)})
+            except Exception as exc:  # pragma: no cover - defensive
+                self._redirect({"error": "%s: %s" % (type(exc).__name__, exc)})
+            return
+        if path != "/record":
             self._send_html(_page("Not found", "<h1>404</h1>"), 404)
             return
         form = self._form()
@@ -475,11 +681,17 @@ def serve(
     records_dir: str,
     packs_dir: str = "",
     center_domain: str = "",
+    prose_dir: str = "",
+    cfg: Any = None,
+    workdir: str = "",
     host: str = "127.0.0.1",
     port: int = 8765,
 ) -> Tuple[str, Any]:
     """Start the review server. Returns (url, server). The caller runs serve_forever()."""
-    state = ReviewState(manifest_path, drafts_dir, records_dir, packs_dir, center_domain)
+    state = ReviewState(
+        manifest_path, drafts_dir, records_dir, packs_dir, center_domain,
+        prose_dir=prose_dir, cfg=cfg, workdir=workdir,
+    )
     handler = type("BoundReviewHandler", (ReviewHandler,), {"state": state})
     server = ThreadingHTTPServer((host, port), handler)
     url = "http://%s:%d/" % (host, server.server_address[1])

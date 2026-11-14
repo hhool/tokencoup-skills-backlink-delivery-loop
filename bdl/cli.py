@@ -177,6 +177,8 @@ def _parser() -> argparse.ArgumentParser:
     ui.add_argument("--drafts", default="data/drafts", help="Directory of .eml drafts")
     ui.add_argument("--records-dir", default="")
     ui.add_argument("--packs", default="", help="Directory of prefill packs to offer for download")
+    ui.add_argument("--prose-dir", default="", help="Prose contacts used by the /import chain")
+    ui.add_argument("--workdir", default="", help="Where /import writes snapshots, manifests, drafts")
     ui.add_argument("--center-domain", default="")
     ui.add_argument("--host", default="127.0.0.1")
     ui.add_argument("--port", type=int, default=8765)
@@ -701,6 +703,9 @@ def _run(args: argparse.Namespace) -> dict:
             records_dir=args.records_dir or cfg.records_dir,
             packs_dir=args.packs,
             center_domain=args.center_domain or cfg.center_domain,
+            prose_dir=args.prose_dir or str(cfg.prose_dir),
+            cfg=cfg,
+            workdir=args.workdir or str(cfg.out_dir / "import"),
             host=args.host,
             port=args.port,
         )

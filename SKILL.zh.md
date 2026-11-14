@@ -80,6 +80,7 @@ agent_created: true
 16. `observe --target-url <page> --own-url <our-url>` —— 本地 L4 检测器。仅一次只读 GET：找到指向自身主机的锚点记 `found`；2xx 页面但无该锚点记 `absent`；任何抓取失败（403、超时、robots）记 `unknown`。可用 `--record <file>` 把观测追加为 JSONL。
 17. `scan --manifest <delivery-manifest.json> [--auto-confirm] [--out <dir>]` —— 自动扫描。对每个可观测行（含 `target_url` + `own_url`）跑 L4 检测，把结果追加进 `observations.jsonl` 并分类。加 `--auto-confirm`（或 `BDL_AUTO_CONFIRM=true`）时，命中的链接在本地标 `live` 并把确认提案排队进 `confirm-proposals.jsonl`。把共享 link-ledger 标记为 `live` 仍是独立的、需人工确认的 SEXTANT 步骤。
 18. `replies --source <.eml|.mbox|目录> [--manifest <file>] [--auto-confirm]` —— 读取导出的回复，逐封匹配到目标域名，并把分类提案排队。见「分类回复」。
+19. `serve --manifest <file> [--drafts <dir>] [--packs <dir>] [--prose-dir <dir>]` —— 本地评审界面（仅 127.0.0.1）。只读仪表盘加两个操作者端点：POST `/record`（与 `record` 命令同一套校验，须人工点击表单）和 POST `/import`（上传 prospector CSV，依次执行 `import-prospects` → `build-manifest` → `draft` 并把仪表盘切到新批次）。页面本身绝不发送；`live` 仍只属 L4 判定。
 
 ## 投影状态
 

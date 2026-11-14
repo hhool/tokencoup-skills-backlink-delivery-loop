@@ -164,6 +164,12 @@ not in context and any CJK in email copy (R-522).
 18. `replies --source <.eml|.mbox|dir> [--manifest <file>] [--auto-confirm]` - read
     exported replies, match each to its target domain, and queue a classification
     proposal per reply. See *Classifying replies*.
+19. `serve --manifest <file> [--drafts <dir>] [--packs <dir>] [--prose-dir <dir>]` -
+    the local review UI on 127.0.0.1. Read-only dashboard plus the two operator
+    endpoints: POST `/record` (the `record` command's validation, behind a form
+    click) and POST `/import` (upload a prospect CSV, which runs
+    `import-prospects` -> `build-manifest` -> `draft` and swaps the dashboard to
+    the new batch). Nothing is sent from the page; `live` stays L4's judgement.
 
 ## Projection states
 

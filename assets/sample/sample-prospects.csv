@@ -1,0 +1,9 @@
+﻿domain,url,type_key,priority,http_status,valid,already_have,is_competitor,is_gap,note,note_en
+edmprod.com,https://www.edmprod.com,guest,2,200,true,false,false,true,Guest post target,Music production blog with guest posts
+soundmaterial.com,https://www.soundmaterial.com,resource,3,200,true,false,false,true,Resource page target,Maintains a curated sound-effects list
+soundforums.net,https://www.soundforums.net,community,3,200,true,false,false,true,Community share,Active audio community forum
+grammy.com,https://www.grammy.com,authority,1,200,true,false,false,true,Press room form,Recording Academy press resources
+krotos.studio,https://krotos.studio,industry_media,2,200,true,false,false,true,Sound design outlet,Sound design software makers blog
+99sounds.org,https://www.99sounds.org,reciprocal,3,200,true,false,false,false,Link exchange offer,Asked for a reciprocal link - declined
+voicemod.net,https://www.voicemod.net,partner,2,200,true,false,true,false,Competitor profile,Competitor not a link target
+offline-notice.example,https://offline-notice.example,resource,3,,true,false,false,true,Unreachable,Domain that never resolves
