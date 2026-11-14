@@ -1,0 +1,5 @@
+{"provider_id": "re_abc123", "status": "delivered"}
+{"provider_id": "re_def456", "status": "bounced"}
+{"provider_id": "re_ghi789", "status": "delivery_delayed"}
+{"provider_id": "re_jkl012", "status": "complained"}
+{"provider_id": "re_mno345", "http_status": 429, "body": {"error": "rate limited"}}

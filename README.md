@@ -1,8 +1,9 @@
 # Backlink Delivery Loop
 
 Prepare and record backlink outreach for a center domain, then observe whether a
-link actually goes live. Python standard library only. No network calls, no form
-submissions, no mail transmission.
+link actually goes live. Python standard library only. No form submissions, no mail
+transmission: every network call is a read-only GET (page observation, provider
+receipts).
 
 English is the source of truth. `README.zh.md` and every `*.zh.md` are Chinese
 mirrors; code, English documents and English comments contain no Hanzi.
@@ -23,7 +24,9 @@ mirrors; code, English documents and English comments contain no Hanzi.
 | Apply admission, cadence and repeat-window rules | Register accounts or log in |
 | Write a review-only `delivery-manifest.json` | Send a pitch or submit a form |
 | Append tamper-evident JSONL receipts | Write `link-ledger.state` |
-| Compute the submitted-to-live observation schedule | Fetch target pages (rule-backed worker, future) |
+| Compute the submitted-to-live observation schedule | Send, resend or retry anything |
+| Observe target pages for a live link (L4, read-only) | Declare failure from a short window |
+| Poll the sending provider for delivered / bounced (L2, read-only) | Turn a receipt into a `live` verdict |
 | Build a standalone distribution zip | Auto-install into `.workbuddy/skills` |
 
 `BDL_AUTO_TRANSMIT=true` is rejected at startup. This implements the confirmed
@@ -84,6 +87,7 @@ On the sample fixture the manifest reports 9 rows: 3 `ready_for_review`,
 | `render-template --channel-type ... --context-json ...` | Preview outbound copy a row would receive |
 | `lookup --target-domain ... [--history ...] [--history-dir ...]` | Reconcile recorded sends for one target domain |
 | `record --target-domain ... --channel form\|email --action ...` | Record one delivery action; append-only and idempotent |
+| `poll-receipts --provider resend\|postmark [--auto-confirm] [--dry-run]` | Read provider events for unresolved sends (L2, one GET each) |
 | `status [--manifest ...] [--channel ...] [--target-domain ...]` | Fold the event log into a current state per domain and channel |
 | `forms list\|show\|register\|check` | Form fingerprint registry; a first-seen form needs a named human reviewer |
 | `plan-window --submitted-at ...` | T+1/3/7/14/30 day schedule |
@@ -103,7 +107,8 @@ a traceback.
 `BDL_CENTER_DOMAIN`, `BDL_OWN_SITE_BASE`, `BDL_TIER` (`A`/`B`), `BDL_AUTO_TRANSMIT`
 (must stay `false`), `BDL_AUTO_CONFIRM` (default `false`), `BDL_DEFERRAL_WINDOW_DAYS`
 (default `90`), `BDL_DAILY_CEILING` (default `100`), `BDL_RECEIPT_WINDOW_DAYS`
-(default `30`), `BDL_CONTACT_LOST_DAYS` (default `180`), `BDL_LOG_LEVEL`.
+(default `30`), `BDL_CONTACT_LOST_DAYS` (default `180`), `BDL_PROVIDER`,
+`BDL_PROVIDER_BASE_URL`, `BDL_PROVIDER_API_KEY`, `BDL_LOG_LEVEL`.
 See `.env.example` for the full list.
 
 ### Delivery channel is not the same axis as channel type
@@ -131,6 +136,35 @@ A `sent` needs a provider id; a `submitted` needs evidence; a `reply` needs a cl
 domain is closed rather than negotiated. A bounce puts the *address* into a 180-day
 cooldown without closing the domain's other channel. No receipt inside 30 days is
 `unanswered_no_receipt` - unknown, never "failed", and never a reason to resend.
+
+### Transport receipts (L2)
+
+`sent` proves a provider accepted a message and can name it. `poll-receipts` turns
+that name into an answer.
+
+```bash
+export BDL_PROVIDER=resend
+export BDL_PROVIDER_API_KEY=re_readonly_key
+
+python3 bin/delivery poll-receipts --records-dir data/records            # queue proposals
+python3 bin/delivery poll-receipts --records-dir data/records --auto-confirm
+python3 bin/delivery poll-receipts --provider resend --map-status complained
+```
+
+| Provider word | Result | Why |
+|---|---|---|
+| `delivered`, `opened`, `clicked` | `delivered` event | an open cannot precede arrival |
+| `bounced`, `complained` | `bounced` event | the address enters the contact-lost cooldown |
+| `delivery_delayed`, `queued` | `pending`, no event | still in flight, not a verdict |
+| 401 / 404 / 429 / 5xx / timeout / unknown word | `unknown`, no event | a bad read is not a bounce |
+
+Only sends inside `BDL_RECEIPT_WINDOW_DAYS` with a provider id and no resolving
+receipt are queried, so polling is bounded and idempotent: a resolution is keyed on
+`(provider id, action)`, not on the provider's imprecise timestamps. Read-only: one
+authenticated GET per message, nothing resent. A receipt never sets `live`.
+
+`--fixture <file>` replays a recorded response set instead of calling the API, which
+is how a poll is rehearsed offline (see `assets/provider-events.example.jsonl`).
 
 ### Form fingerprint registry
 
@@ -169,8 +203,11 @@ link-ledger - promoting the shared state is a separate, human-confirmed SEXTANT 
 }
 ```
 
-`data/out/receipts.jsonl` is append-only. Both are derived artefacts; neither is the
-ledger. `data/` is gitignored.
+`data/out/receipts.jsonl` is append-only, as is
+`data/observations/transport-receipts.jsonl` (one row per polled message, including
+the ones that resolved to nothing). `data/out/receipts.jsonl` records that a manifest
+was built; the transport ledger records what a provider said. All are derived
+artefacts; none is the ledger. `data/` is gitignored.
 
 ## 7. Architecture
 
@@ -182,10 +219,18 @@ bdl/services/                business rules, no HTTP types, no file handles
   cadence.py                 90-day window, per-domain 24h ceiling
   window.py                  observation schedule, unknown != absent
   pipeline.py                orchestration
+  state.py                   event log -> one state per (domain, channel) + timers
+  record.py                  one validated, idempotent event
+  observe.py / scan.py       L4 detector and auto-scan
+  receipts.py                L2 receipt plan, poll and record
 bdl/adapters/                all I/O
   snapshot.py                contract C validator
   prose.py                   prose extraction with provenance
   outbox.py                  atomic writes, append-only receipts, history reader
+  events.py                  append-only delivery event log
+  observation.py             observation ledger and proposal queue
+  forms.py                   form fingerprint registry
+  provider_events.py         provider receipt API reader (injectable)
 bdl/config.py                central environment validation, fail fast
 bdl/errors.py                typed errors
 bdl/log.py                   structured JSON logging with masking
@@ -213,11 +258,11 @@ PYTHONPATH=$PWD python3 -m unittest discover -s tests -t . -v
 python3 -m compileall -q bdl bin tests
 ```
 
-122 offline unit and CLI tests cover schema rejection, CSV import mapping, prose
+169 offline unit and CLI tests cover schema rejection, CSV import mapping, prose
 provenance, field mapping, cadence, the observation window, templates, history
 reconciliation, the scan/auto-confirm ledger, event idempotency, the state
-projection and its two timers, form fingerprints, the transmission gate, packaging
-and CLI output.
+projection and its two timers, form fingerprints, provider status mapping, receipt
+polling and its idempotency, the transmission gate, packaging and CLI output.
 No test needs network access or mocks a service layer.
 
 ## 10. Distribution
@@ -234,8 +279,8 @@ the zip explicitly where the skill is needed; it is not auto-loaded.
   only marks the local observation ledger `live` and queues a proposal.
 - The upstream exporter side of contract C (the prospector store producer inside
   `backlink-prospector` that emits the snapshot this package consumes).
-- MX resolution and provider event polling (L2-L4 address levels). `record` accepts
-  a receipt a human or a separate poller obtained; it does not fetch one.
+- MX resolution and SMTP-level address verification (L3). `poll-receipts` reads what
+  the provider already knows (L2); it does not probe a mailbox.
 - Form prefill and submission. `forms register` stores a verified field map; the
   act of filling and clicking submit stays human.
 - Inbound reply parsing. `record --action reply` takes the classification a human

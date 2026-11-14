@@ -5,7 +5,7 @@
 | Layer | Observable evidence | Locally decidable | Written to |
 |---|---|---|---|
 | L1 Action | Form POST 2xx + thank-you URL + screenshot; mail `accepted` + `provider_id` | yes | `submitted_at`, `confirmation_ref`, evidence |
-| L2 Transport | `GET /emails/{id}` -> `delivered` / `bounced` / `complained` | yes | `outreach-receipts.json` |
+| L2 Transport | `GET /emails/{id}` -> `delivered` / `bounced` / `complained` | yes | `transport-receipts.jsonl` + the event log |
 | L3 Acceptance | Whether the other side received and reviewed it | **no** | never; a `gaps` entry instead |
 | L4 Live link | An `<a>` pointing at `own_url` in `target_url` HTML | yes, long window | `live_at`, `verify` snapshot |
 
@@ -66,8 +66,9 @@ changelogs and docs. Frozen schemas should not be created for shapes that are no
 settled.
 
 Implemented locally: `bdl/services/window.py` provides `plan`, `next_check_due`,
-`classify` and `terminal_state`. It does not fetch pages; fetching belongs to a
-future rule-backed worker.
+`classify` and `terminal_state`; `bdl/services/scan.py` performs the fetch through an
+injected `Fetcher`. The observation is written to the local ledger and only a human
+promotes `live` into the shared link-ledger.
 
 ## 5. Time windows
 
@@ -87,3 +88,34 @@ Discipline:
   tracking parameters.
 - Pin `verify.content_hash` only when `found`, to distinguish deletion from a
   page rebuild.
+
+## 6. Transport receipt polling
+
+`record --action sent` refuses a send without a `provider_id`, because an unnamed
+message cannot be reconciled. `poll-receipts` is the other half: one authenticated
+GET per unresolved send, mapped onto the ledger vocabulary.
+
+| Question | Answer in code |
+|---|---|
+| Which sends are polled? | `sent`, has a `provider_id`, inside `BDL_RECEIPT_WINDOW_DAYS`, no resolving receipt yet |
+| What resolves a send? | a `delivered` or `bounced` event for that `(provider_id, action)` |
+| How is a duplicate avoided? | the key is `(provider_id, action)`, not the provider's timestamp, which is not precise enough to be an idempotency key |
+| What is never written? | a `bounced` event derived from a failed read, and any `live` state |
+| Where do results land? | `transport-receipts.jsonl` (every polled message, including inconclusive ones) and, when confirmed, the event log |
+
+Mapping discipline:
+
+- `delivered` / `opened` / `clicked` -> `delivered`. An open cannot precede arrival,
+  so treating it as weaker evidence would understate a fact the provider observes.
+- `bounced` / `complained` / `hardbounce` / `spamcomplaint` -> `bounced`, which puts
+  the **address** into the `BDL_CONTACT_LOST_DAYS` cooldown. The domain stays open on
+  its other channel.
+- `delivery_delayed` / `queued` / `softbounce` -> `pending`, no event. Still in
+  flight is not a verdict.
+- 401, 403, 404, 429, 5xx, timeout, non-JSON body, unrecognised status word ->
+  `unknown`, no event. This is the same asymmetry as the L4 observer: a refusal is
+  never an absence. Closing a live mailbox for 180 days because an API returned 429
+  is the expensive version of that mistake.
+
+A receipt proves transport (L2) and stops there. It does not prove the link exists,
+does not touch `link-ledger.state`, and does not authorise a resend.

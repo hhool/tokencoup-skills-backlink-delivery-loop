@@ -1,6 +1,6 @@
 ---
 name: backlink-delivery-loop
-description: 用于为某个中心域名准备、执行或复核外链投递闭环：导入 tokencoup-skills-backlink-prospector 的带版本候选快照（store JSON 或 CSV 导出）、把运维散文结构化为联系地址、计算投递节奏与 submitted→live 观察窗、产出仅供审阅的投递清单、记录人工实际执行的投递动作，并把事件流投影成每个域名与渠道的当前状态。本 skill 不发邮件、不提交表单。
+description: 用于为某个中心域名准备、执行或复核外链投递闭环：导入 tokencoup-skills-backlink-prospector 的带版本候选快照（store JSON 或 CSV 导出）、把运维散文结构化为联系地址、计算投递节奏与 submitted→live 观察窗、产出仅供审阅的投递清单、记录人工实际执行的投递动作，向发信商只读拉取送达/退信回执，并把事件流投影成每个域名与渠道的当前状态。本 skill 不发邮件、不提交表单。
 agent_created: true
 ---
 
@@ -10,7 +10,7 @@ agent_created: true
 
 把某个中心域名的候选外链池，变成**可审阅的投递清单**与完整证据链，再观察外链是否真正上线。本 skill 是**独立分发包**：不会被 WorkBuddy 的 skill 扫描器自动加载，必须显式安装。
 
-**硬边界**：本包不联网、不提交表单、不发送邮件。`BDL_AUTO_TRANSMIT=true` 会在启动时被拒绝。发送动作保留在人工门之后（R-520；R-530 中 U 类目标的 tier B）。
+**硬边界**：本包从不发送——不提交表单、不发邮件。它的全部网络调用都是只读 GET（L4 页面观测与 L2 发信商回执拉取），`BDL_AUTO_TRANSMIT=true` 会在启动时被拒绝。发送动作保留在人工门之后（R-520；R-530 中 U 类目标的 tier B）。
 
 ## 不变量
 
@@ -49,6 +49,9 @@ agent_created: true
 | `BDL_DAILY_CEILING` | `100` | 按目标域名的每日上限（R-530 实例覆盖）。是天花板，不是起步量：发件域要逐周爬坡 |
 | `BDL_RECEIPT_WINDOW_DAYS` | `30` | 一次发送或提交最多可以「未回应」多久，超过即结案 |
 | `BDL_CONTACT_LOST_DAYS` | `180` | 退信地址的冷却期。挂在地址上，不是挂在域名上 |
+| `BDL_PROVIDER` | - | 要拉取回执的发信商：`resend` 或 `postmark`。不设置即人工对账 |
+| `BDL_PROVIDER_BASE_URL` | 按发信商 | 覆盖回执 API 基址（本地 mock、区域端点） |
+| `BDL_PROVIDER_API_KEY` | - | 回执 API 的只读密钥。不进入配置对象、不打印。缺失即无法拉取 |
 | `BDL_LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARN` / `ERROR` |
 
 ### 模板（按渠道类型可配置）
@@ -67,12 +70,13 @@ agent_created: true
 6. `lookup --target-domain <domain> [--history ...] [--history-dir ...]` —— 跨所有历史源，对单个目标域名对账已记录的发送/观测。
 7. 人工逐条审阅 `ready_for_review` 行；任何工具都不得自动执行。
 8. `record --target-domain <d> --channel <form|email> --action <...>` —— 记录人工**实际执行**的动作。append-only 且幂等：重复的事件 id 会被拒绝而不是重复写入。`sent` 必须带 `--provider-id`；`submitted` 必须带 `--evidence`；`reply` 必须带 `--reply-class yes|no|pay|reciprocal`。`pay` 与 `reciprocal` 会被记录并标记 `compliance: refused`（R-510）——域名就此关闭，不进入议价。
-9. `status [--manifest <file>] [--channel <form|email>] [--target-domain <d>]` —— 把事件日志折叠成每个 `(target_domain, channel)` 的当前状态，回答「投放中 / 已投递 / 已上线」。每个状态都带 `next_action`，涉及计时的还带 `window.due_at`。用 manifest 播种时，未被 block 的目标会以 `not_started` 出现，不会有行凭空消失。
-10. `forms list|show|register|check` —— 表单指纹注册表。表单由 `sha256(方法 + action 路径 + 排序后的字段名)` 识别，绝不只看域名：同一站的「联系我们」与「提交资源」字段不同。未见过指纹返回 `needs_human_verify`；`register` 强制要求 `--reviewed-by`，带验证码或需登录的表单存为 `manual_only`。
-11. `plan-window --submitted-at <iso>` —— 计算 T+1/3/7/14/30 天抓取排期。
-12. `classify --outcome ... --http-status ...` —— 记录一次观测。403、超时、robots 拒绝记 `unknown`，绝不记 `absent`。
-13. `observe --target-url <page> --own-url <our-url>` —— 本地 L4 检测器。仅一次只读 GET：找到指向自身主机的锚点记 `found`；2xx 页面但无该锚点记 `absent`；任何抓取失败（403、超时、robots）记 `unknown`。可用 `--record <file>` 把观测追加为 JSONL。
-14. `scan --manifest <delivery-manifest.json> [--auto-confirm] [--out <dir>]` —— 自动扫描。对每个可观测行（含 `target_url` + `own_url`）跑 L4 检测，把结果追加进 `observations.jsonl` 并分类。加 `--auto-confirm`（或 `BDL_AUTO_CONFIRM=true`）时，命中的链接在本地标 `live` 并把确认提案排队进 `confirm-proposals.jsonl`。把共享 link-ledger 标记为 `live` 仍是独立的、需人工确认的 SEXTANT 步骤。
+9. `poll-receipts --provider <resend|postmark> [--auto-confirm] [--dry-run]` —— 向发信商查每个未结案发送的结局。每封信一次 GET，只查「在 `BDL_RECEIPT_WINDOW_DAYS` 内、带 provider id、且尚无定论回执」的发送。`delivered` 与 `bounced` 落成事件；`pending` 与 `unknown` 什么都不写。回执台账写进 `transport-receipts.jsonl`。不加 `--auto-confirm`（且 `BDL_AUTO_CONFIRM=false`）时，事件只排队进 `receipt-proposals.jsonl` 等人工确认。401、404、429、5xx、超时或无法识别的状态词一律记 `unknown`，绝不当退信——被限流的 API 不能把一个活邮箱关 180 天。`--map-status <word>` 只打印某个发信商状态词的映射，不发起调用。
+10. `status [--manifest <file>] [--channel <form|email>] [--target-domain <d>]` —— 把事件日志折叠成每个 `(target_domain, channel)` 的当前状态，回答「投放中 / 已投递 / 已上线」。每个状态都带 `next_action`，涉及计时的还带 `window.due_at`。用 manifest 播种时，未被 block 的目标会以 `not_started` 出现，不会有行凭空消失。
+11. `forms list|show|register|check` —— 表单指纹注册表。表单由 `sha256(方法 + action 路径 + 排序后的字段名)` 识别，绝不只看域名：同一站的「联系我们」与「提交资源」字段不同。未见过指纹返回 `needs_human_verify`；`register` 强制要求 `--reviewed-by`，带验证码或需登录的表单存为 `manual_only`。
+12. `plan-window --submitted-at <iso>` —— 计算 T+1/3/7/14/30 天抓取排期。
+13. `classify --outcome ... --http-status ...` —— 记录一次观测。403、超时、robots 拒绝记 `unknown`，绝不记 `absent`。
+14. `observe --target-url <page> --own-url <our-url>` —— 本地 L4 检测器。仅一次只读 GET：找到指向自身主机的锚点记 `found`；2xx 页面但无该锚点记 `absent`；任何抓取失败（403、超时、robots）记 `unknown`。可用 `--record <file>` 把观测追加为 JSONL。
+15. `scan --manifest <delivery-manifest.json> [--auto-confirm] [--out <dir>]` —— 自动扫描。对每个可观测行（含 `target_url` + `own_url`）跑 L4 检测，把结果追加进 `observations.jsonl` 并分类。加 `--auto-confirm`（或 `BDL_AUTO_CONFIRM=true`）时，命中的链接在本地标 `live` 并把确认提案排队进 `confirm-proposals.jsonl`。把共享 link-ledger 标记为 `live` 仍是独立的、需人工确认的 SEXTANT 步骤。
 
 ## 投影状态
 
@@ -95,6 +99,24 @@ agent_created: true
 
 `live` 是唯一的成功状态，且只能来自观测。发送只能证明「发出了」（L1），不能证明链接存在（L4）。窗口内的缺席永远不构成失败（R-512 / R-513）。
 
+## 传输回执（L2）
+
+`sent` 只能证明发信商收下了这封信、并且能指名它。`poll-receipts` 把这个名字换成答案：送达、退信，或仍是未知。
+
+| 发信商状态词 | 台账结果 | 原因 |
+|---|---|---|
+| `delivered`、`opened`、`clicked` | `delivered` 事件 | 打开不可能先于送达 |
+| `bounced`、`complained`、`hardbounce`、`spamcomplaint` | `bounced` 事件 | 地址进入失联冷却 |
+| `delivery_delayed`、`queued`、`softbounce` | `pending`，不落事件 | 仍在途中，不是结论 |
+| 401 / 403 / 404 / 429 / 5xx / 超时 / 未知状态词 | `unknown`，不落事件 | 读失败不是退信 |
+
+三条约束：
+
+- **有界**。只查 `BDL_RECEIPT_WINDOW_DAYS` 内、带 provider id、且尚无定论回执的发送，因此轮询幂等且不会发散。
+- **一事一记**。定论以 `(provider id, action)` 为键，不用发信商并不精确的时间戳；重复轮询不会多写一条。
+- **不是提升**。回执属 L2：永不置 `live`，永不写共享 link-ledger，也永不构成对退信地址在冷却期内的重发许可。
+
+
 ## 清单状态
 
 `ready_for_review`（材料齐、待人工门）—— `needs_enrichment`（缺落点页或投递通道，写入 `gaps`）—— `deferred`（90 天重复窗）—— `blocked`（竞品、已拥有、上游 `is_gap=false`、互链、不可达、地址被排除、已有 live 链接）。
@@ -104,8 +126,8 @@ agent_created: true
 ## 分层
 
 - 入口层 `bdl/cli.py`：只解析参数、格式化 JSON。
-- 服务层 `normalize`、`cadence`、`window`、`pipeline`、`templates`、`scan`、`state`、`record`：承载业务规则，不碰 HTTP 与文件句柄（`scan`/`observe` 的网络调用被注入在 `Fetcher` 之后）。
-- 适配层 `snapshot`、`csv_import`、`prospector_export`、`prose`、`outbox`、`observation`、`events`、`forms`：承担全部 I/O。
+- 服务层 `normalize`、`cadence`、`window`、`pipeline`、`templates`、`scan`、`state`、`record`、`receipts`：承载业务规则，不直接碰 HTTP 与文件句柄（`scan`/`observe`/`receipts` 的网络调用被注入在 `Fetcher` / `Reader` 可调用之后）。
+- 适配层 `snapshot`、`csv_import`、`prospector_export`、`prose`、`outbox`、`observation`、`events`、`forms`、`provider_events`：承担全部 I/O。
 - 横切：集中环境变量校验、类型化错误 + 全局处理、带 `batch_id` 的结构化 JSON 日志、边界输入校验、幂等键、原子写与 append-only 回执与事件。
 
 ## References

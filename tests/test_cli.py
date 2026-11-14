@@ -234,6 +234,57 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(code, 0)
             self.assertTrue(known["known"])
+    def test_poll_receipts_records_a_delivery(self):
+        from datetime import datetime, timedelta, timezone
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self._workspace(tmp)
+            sent_at = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self._run(
+                ["record", "--target-domain", "mixkit.co", "--channel", "email",
+                 "--action", "sent", "--address", "e@mixkit.co",
+                 "--provider-id", "msg_1", "--at", sent_at],
+                env,
+            )
+            fixture = Path(tmp) / "fixture.jsonl"
+            fixture.write_text(json.dumps({"provider_id": "msg_1", "status": "delivered"}) + "\n",
+                               encoding="utf-8")
+            code, payload, _ = self._run(
+                ["poll-receipts", "--provider", "resend", "--fixture", str(fixture),
+                 "--auto-confirm"],
+                env,
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["polls"], 1)
+            self.assertEqual(payload["by_status"]["delivered"], 1)
+            self.assertEqual(payload["events_written"], 1)
+
+            code, status, _ = self._run(["status"], env)
+            self.assertEqual(code, 0)
+            self.assertEqual(status["rows"][0]["state"], "delivered")
+
+    def test_poll_receipts_needs_no_key_when_nothing_is_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(self._workspace(tmp), BDL_PROVIDER_API_KEY="")
+            code, payload, _ = self._run(
+                ["poll-receipts", "--provider", "resend"],
+                env,
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["polls"], 0)
+
+    def test_poll_receipts_refuses_without_provider(self):
+        code, _, stderr = self._run(["poll-receipts"], {"BDL_AUTO_TRANSMIT": "false",
+                                                        "BDL_PROVIDER": ""})
+        self.assertEqual(code, 1)
+        self.assertIn("CONFIG_ERROR", stderr)
+
+    def test_poll_receipts_maps_one_status_word(self):
+        code, payload, _ = self._run(
+            ["poll-receipts", "--provider", "resend", "--map-status", "complained"],
+            {"BDL_AUTO_TRANSMIT": "false"},
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["status"], "bounced")
 
 
 if __name__ == "__main__":

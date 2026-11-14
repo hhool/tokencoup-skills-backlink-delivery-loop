@@ -49,6 +49,9 @@ class Config:
     daily_ceiling: int = 100
     receipt_window_days: int = 30
     contact_lost_days: int = 180
+    provider: str = ""
+    provider_base_url: str = ""
+    provider_key_present: bool = False
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "Config":
@@ -100,6 +103,12 @@ class Config:
         if not base and center:
             base = "https://" + center
 
+        provider = source.get("BDL_PROVIDER", "").strip().lower()
+        provider_base = source.get("BDL_PROVIDER_BASE_URL", "").strip().rstrip("/")
+        # The key itself never enters the config object: a frozen dataclass ends up
+        # in logs and JSON dumps, and a receipt poll only needs to know it exists.
+        key_present = bool(source.get("BDL_PROVIDER_API_KEY", "").strip())
+
         return cls(
             home=home,
             snapshot_dir=_path(home, "BDL_SNAPSHOT_DIR", "data/snapshots", source),
@@ -120,4 +129,7 @@ class Config:
             daily_ceiling=ceiling,
             receipt_window_days=receipt,
             contact_lost_days=lost,
+            provider=provider,
+            provider_base_url=provider_base,
+            provider_key_present=key_present,
         )

@@ -1,6 +1,6 @@
 ---
 name: backlink-delivery-loop
-description: This skill should be used when preparing, running or reviewing a backlink delivery loop for a center domain - importing versioned prospect snapshots from tokencoup-skills-backlink-prospector (store JSON or CSV export), structuring contact addresses from operator prose, computing cadence and the submitted-to-live observation window, writing a review-only delivery manifest, recording the delivery actions a human performed, and projecting the event log into a current state per domain and channel. It never sends mail and never submits a form.
+description: This skill should be used when preparing, running or reviewing a backlink delivery loop for a center domain - importing versioned prospect snapshots from tokencoup-skills-backlink-prospector (store JSON or CSV export), structuring contact addresses from operator prose, computing cadence and the submitted-to-live observation window, writing a review-only delivery manifest, recording the delivery actions a human performed, polling the sending provider for delivered / bounced transport receipts, and projecting the event log into a current state per domain and channel. It never sends mail and never submits a form.
 agent_created: true
 ---
 
@@ -13,9 +13,11 @@ complete audit trail, then observe whether a link actually goes live. The skill 
 standalone distribution package: it is not auto-loaded by the WorkBuddy skill
 scanner and must be installed explicitly.
 
-**Hard boundary.** This package performs no network calls, no form submissions and no
-mail transmission. `BDL_AUTO_TRANSMIT=true` is rejected at startup. Transmission
-stays behind a human review gate (R-520, R-530 tier B on class U targets).
+**Hard boundary.** This package never transmits: no form submission, no mail send.
+Every network call it makes is a read-only GET (the L4 page observer and the L2
+provider receipt poll), and `BDL_AUTO_TRANSMIT=true` is rejected at startup.
+Transmission stays behind a human review gate (R-520, R-530 tier B on class U
+targets).
 
 ## Invariants
 
@@ -56,6 +58,9 @@ All behaviour is driven by environment variables, validated once at startup:
 | `BDL_DAILY_CEILING` | `100` | Per-target-domain daily ceiling (R-530 instance override). Ceiling, not a starting rate: warm the sending domain up gradually. |
 | `BDL_RECEIPT_WINDOW_DAYS` | `30` | How long a send or submission may stay unanswered before it is closed as unanswered. |
 | `BDL_CONTACT_LOST_DAYS` | `180` | Cooldown for an address that bounced. Attached to the address, not the domain. |
+| `BDL_PROVIDER` | - | Sending provider whose receipt API is read: `resend` or `postmark`. Unset means receipts are reconciled by hand. |
+| `BDL_PROVIDER_BASE_URL` | per provider | Override the receipt API base (a local mock, a regional endpoint). |
+| `BDL_PROVIDER_API_KEY` | - | Read-only key for the receipt API. Never enters the config object, never printed. Absent means no poll is possible. |
 | `BDL_LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARN` / `ERROR`. |
 
 ### Templates (configurable per channel type)
@@ -100,24 +105,34 @@ not in context and any CJK in email copy (R-522).
    a `reply` needs `--reply-class yes|no|pay|reciprocal`. `pay` and `reciprocal`
    are recorded and flagged `compliance: refused` (R-510) - the domain is closed,
    not negotiated.
-9. `status [--manifest <file>] [--channel <form|email>] [--target-domain <d>]` -
-   fold the event log into one current state per `(target_domain, channel)` and
-   answer "in delivery / delivered / live". Every state carries a `next_action`
-   and, where a timer applies, `window.due_at`. Seeding from a manifest turns
-   untouched (non-blocked) targets into `not_started` rows so nothing is invisible.
-10. `forms list|show|register|check` - the form fingerprint registry. A form is
+9. `poll-receipts --provider <resend|postmark> [--auto-confirm] [--dry-run]` - ask the
+   sending provider what happened to each unresolved send. One GET per message, only
+   for sends inside `BDL_RECEIPT_WINDOW_DAYS` that carry a provider id and have no
+   resolving receipt yet. `delivered` and `bounced` become events; `pending` and
+   `unknown` write nothing. The receipt ledger goes to `transport-receipts.jsonl`.
+   Without `--auto-confirm` (and with `BDL_AUTO_CONFIRM=false`) the events are only
+   queued to `receipt-proposals.jsonl` for review. A 401, 404, 429, 5xx, timeout or
+   unrecognised status word is `unknown`, never a bounce - a rate-limited API must
+   not close a live mailbox for 180 days. `--map-status <word>` prints the mapping
+   for one provider status without calling anything.
+10. `status [--manifest <file>] [--channel <form|email>] [--target-domain <d>]` -
+    fold the event log into one current state per `(target_domain, channel)` and
+    answer "in delivery / delivered / live". Every state carries a `next_action`
+    and, where a timer applies, `window.due_at`. Seeding from a manifest turns
+    untouched (non-blocked) targets into `not_started` rows so nothing is invisible.
+11. `forms list|show|register|check` - the form fingerprint registry. A form is
     identified by `sha256(method + action path + sorted field names)`, never by
     domain alone: a site's contact form and its submission form have different
     fields. An unseen fingerprint reports `needs_human_verify`; `register` demands
     `--reviewed-by`, and a CAPTCHA or login-gated form is stored as `manual_only`.
-11. `plan-window --submitted-at <iso>` - compute the T+1/3/7/14/30 day fetch schedule.
-12. `classify --outcome ... --http-status ...` - record an observation. A 403, timeout
+12. `plan-window --submitted-at <iso>` - compute the T+1/3/7/14/30 day fetch schedule.
+13. `classify --outcome ... --http-status ...` - record an observation. A 403, timeout
     or robots refusal is `unknown`, never `absent`.
-13. `observe --target-url <page> --own-url <our-url>` - the local L4 detector. A single
+14. `observe --target-url <page> --own-url <our-url>` - the local L4 detector. A single
     read-only GET; finds an anchor to the own host (`found`), reports `absent` only on
     a 2xx page with no such anchor, and reports `unknown` on any fetch failure (403,
     timeout, robots). Use `--record <file>` to append the observation as JSONL.
-14. `scan --manifest <delivery-manifest.json> [--auto-confirm] [--out <dir>]` - the
+15. `scan --manifest <delivery-manifest.json> [--auto-confirm] [--out <dir>]` - the
     auto-scan. For every observable row (has `target_url` + `own_url`), run the L4
     detector, append the result to `observations.jsonl`, and classify. With
     `--auto-confirm` (or `BDL_AUTO_CONFIRM=true`), a `found` link is marked `live`
@@ -147,6 +162,28 @@ not in context and any CJK in email copy (R-522).
 proves transmission (L1); it does not prove the link exists (L4). An absence inside
 the window is never a failure (R-512 / R-513).
 
+## Transport receipts (L2)
+
+`sent` proves a provider accepted a message and can name it. `poll-receipts` turns
+that name into an answer: delivered, bounced, or still unknown.
+
+| Provider word | Ledger result | Why |
+|---|---|---|
+| `delivered`, `opened`, `clicked` | `delivered` event | an open cannot precede arrival |
+| `bounced`, `complained`, `hardbounce`, `spamcomplaint` | `bounced` event | the address enters the contact-lost cooldown |
+| `delivery_delayed`, `queued`, `softbounce` | `pending`, no event | still in flight, not a verdict |
+| 401 / 403 / 404 / 429 / 5xx / timeout / unknown word | `unknown`, no event | a bad read is not a bounce |
+
+Three constraints hold:
+
+- **Bounded.** Only sends inside `BDL_RECEIPT_WINDOW_DAYS` with a provider id and no
+  resolving receipt are queried, so polling is idempotent and cannot fan out.
+- **Once per fact.** A resolution is keyed on `(provider id, action)`, not on the
+  provider's imprecise timestamps; a repeated poll writes nothing new.
+- **Not a promotion.** A receipt is L2. It never sets `live`, never touches the
+  shared link-ledger, and never authorises a resend to a bounced address before the
+  cooldown ends.
+
 ## Manifest statuses
 
 `ready_for_review` (materials complete, human gate pending) - `needs_enrichment`
@@ -162,10 +199,11 @@ lives in `status`, never in a manifest.
 
 - Entry layer: `bdl/cli.py` parses arguments and formats JSON only.
 - Service layer: `normalize`, `cadence`, `window`, `pipeline`, `templates`, `scan`,
-  `state`, `record` hold business rules and never touch HTTP or file handles (the
-  network call in `scan`/`observe` is injected behind a `Fetcher`).
+  `state`, `record`, `receipts` hold business rules and never touch HTTP or file
+  handles directly (the network call in `scan`/`observe`/`receipts` is injected
+  behind a `Fetcher` / `Reader` callable).
 - Adapter layer: `snapshot`, `csv_import`, `prospector_export`, `prose`, `outbox`,
-  `observation`, `events`, `forms` own all I/O.
+  `observation`, `events`, `forms`, `provider_events` own all I/O.
 - Cross-cutting: central environment validation, typed errors with a global handler,
   structured JSON logs with `batch_id`, boundary input validation, idempotency keys,
   atomic writes and append-only receipts and events.

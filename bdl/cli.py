@@ -110,6 +110,25 @@ def _parser() -> argparse.ArgumentParser:
     rec.add_argument("--center-domain", default="")
     rec.add_argument("--records-dir", default="")
 
+    poll = sub.add_parser(
+        "poll-receipts",
+        help="Poll the sending provider for delivered / bounced events (L2, read-only)",
+    )
+    poll.add_argument("--records-dir", default="")
+    poll.add_argument("--provider", default="", help="resend | postmark (defaults to BDL_PROVIDER)")
+    poll.add_argument("--base-url", default="", help="Override the provider API base")
+    poll.add_argument("--out", default="", help="Directory for the receipt ledger and proposals")
+    poll.add_argument("--fixture", default="", help="Read statuses from a local file, not the network")
+    poll.add_argument("--auto-confirm", action="store_true",
+                      help="Write resolving receipts straight into the event log")
+    poll.add_argument("--dry-run", action="store_true", help="Poll and report, write nothing")
+    poll.add_argument("--window-days", type=int, default=0,
+                      help="Only poll sends inside this window (default BDL_RECEIPT_WINDOW_DAYS)")
+    poll.add_argument("--limit", type=int, default=0, help="Stop after N sends (0 = all)")
+    poll.add_argument("--actor", default="provider-poll")
+    poll.add_argument("--map-status", default="",
+                      help="Print how one provider status word maps, e.g. --map-status bounced")
+
     st = sub.add_parser("status", help="Current state per domain and channel, folded from the event log")
     st.add_argument("--records-dir", default="")
     st.add_argument("--observations-dir", default="")
@@ -197,6 +216,12 @@ def _run(args: argparse.Namespace) -> dict:
                 "daily_ceiling": cfg.daily_ceiling,
             },
             "auto_confirm": cfg.auto_confirm,
+            "provider": {
+                "name": cfg.provider or None,
+                "base_url": cfg.provider_base_url or None,
+                "api_key_configured": cfg.provider_key_present,
+                "note": "Read-only: one GET per unresolved send, inside the receipt window.",
+            },
             "policy": "Human review is required before any transmission (R-520 / R-530 tier B).",
         }
 
@@ -405,6 +430,66 @@ def _run(args: argparse.Namespace) -> dict:
             "policy": notice or None,
             "note": "Append-only. A repeated event id is refused, not duplicated.",
         }
+
+    if args.command == "poll-receipts":
+        from .adapters.events import load_events
+        from .adapters.provider_events import default_reader, fixture_reader, provider_config
+        from .services.receipts import classify_one, execute_polls, pending_sends
+
+        provider = args.provider or cfg.provider
+        config = provider_config(provider, args.base_url or cfg.provider_base_url)
+        if args.map_status:
+            return {"ok": True, "provider": provider, **classify_one(provider, args.map_status)}
+
+        records_dir = Path(args.records_dir or str(cfg.records_dir))
+        out_dir = Path(args.out or str(cfg.observation_dir))
+        moment = datetime.now(timezone.utc)
+        events = load_events([records_dir])
+        polls, already = pending_sends(
+            events, moment, args.window_days or cfg.receipt_window_days, args.limit
+        )
+        # An empty ledger has nothing to ask a provider about, so it needs no key.
+        if not polls:
+            return {
+                "ok": True,
+                "provider": provider,
+                "polls": 0,
+                "already_resolved": already,
+                "by_status": {"delivered": 0, "bounced": 0, "pending": 0, "sent": 0, "unknown": 0},
+                "events_written": 0,
+                "proposals": 0,
+                "note": "No unresolved send inside the receipt window; nothing was queried.",
+            }
+
+        reader = fixture_reader(args.fixture) if args.fixture else default_reader(provider, config)
+        result = execute_polls(
+            events=events,
+            polls=polls,
+            already_resolved=already,
+            reader=reader,
+            provider=provider,
+            config=config,
+            now=moment,
+            events_dir=records_dir,
+            receipt_path=out_dir / "transport-receipts.jsonl",
+            proposal_path=out_dir / "receipt-proposals.jsonl",
+            auto_confirm=bool(args.auto_confirm) or cfg.auto_confirm,
+            dry_run=bool(args.dry_run),
+            actor=args.actor,
+        )
+        logger.emit(
+            "receipts_polled",
+            provider=provider,
+            polls=result["polls"],
+            delivered=result["by_status"].get("delivered", 0),
+            bounced=result["by_status"].get("bounced", 0),
+        )
+        result["provider"] = provider
+        result["note"] = (
+            "A receipt proves transport (L2), never a live link (L4). An unreadable "
+            "status stays unknown, never bounced."
+        )
+        return {"ok": True, **result}
 
     if args.command == "status":
         from .adapters.events import load_events, normalise_legacy

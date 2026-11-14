@@ -1,6 +1,6 @@
 # 外链投递闭环
 
-为某个中心域名准备并记录外链投递，再观察外链是否真正上线。仅依赖 Python 标准库；不联网、不提交表单、不发送邮件。
+为某个中心域名准备并记录外链投递，再观察外链是否真正上线。仅依赖 Python 标准库；不提交表单、不发送邮件——所有网络调用都是只读 GET（页面观测、发信商回执）。
 
 英文为主文档；`README.zh.md` 与所有 `*.zh.md` 是中文镜像。代码、英文文档与英文注释不含汉字。
 
@@ -20,7 +20,9 @@
 | 应用准入、节奏与重复窗规则 | 注册账号或代登录 |
 | 写仅供审阅的 `delivery-manifest.json` | 发信或提交表单 |
 | 追加可审计的 JSONL 回执 | 写 `link-ledger.state` |
-| 计算 submitted→live 观察窗排期 | 抓取目标页（留给规则承载的后台 worker） |
+| 计算 submitted→live 观察窗排期 | 发送、重发或自动重试任何东西 |
+| 观测目标页是否有 live 链接（L4，只读） | 用短窗口判定失败 |
+| 拉取发信商的送达/退信回执（L2，只读） | 把回执当成 `live` 结论 |
 | 构建独立分发 zip | 自动安装进 `.workbuddy/skills` |
 
 `BDL_AUTO_TRANSMIT=true` 在启动时即被拒绝。这落实了已确认的 R-520 裁决：不改规则正文，对 U 类目标采用 R-530 实例级 override + tier B（每批次审阅一次）。
@@ -78,6 +80,7 @@ python3 bin/delivery package --out dist
 | `render-template --channel-type ... --context-json ...` | 预览某行将收到的出站文案 |
 | `lookup --target-domain ... [--history ...] [--history-dir ...]` | 对单个目标域名对账已记录的发送 |
 | `record --target-domain ... --channel form\|email --action ...` | 记录一次投递动作；append-only 且幂等 |
+| `poll-receipts --provider resend\|postmark [--auto-confirm] [--dry-run]` | 拉取未结案发送的回执（L2，每封一次 GET） |
 | `status [--manifest ...] [--channel ...] [--target-domain ...]` | 把事件日志折叠为每个域名、每个渠道的当前状态 |
 | `forms list\|show\|register\|check` | 表单指纹注册表；首次遇到必须具名人工复核 |
 | `plan-window --submitted-at ...` | T+1/3/7/14/30 天排期 |
@@ -96,7 +99,8 @@ python3 bin/delivery package --out dist
 `BDL_AUTO_TRANSMIT`（必须为 `false`）、`BDL_AUTO_CONFIRM`（默认 `false`）、
 `BDL_DEFERRAL_WINDOW_DAYS`（默认 `90`）、`BDL_DAILY_CEILING`（默认 `100`）、
 `BDL_RECEIPT_WINDOW_DAYS`（默认 `30`）、`BDL_CONTACT_LOST_DAYS`（默认 `180`）、
-`BDL_LOG_LEVEL`。完整列表见 `.env.example`。
+`BDL_PROVIDER`、`BDL_PROVIDER_BASE_URL`、`BDL_PROVIDER_API_KEY`、`BDL_LOG_LEVEL`。
+完整列表见 `.env.example`。
 
 ### 投递渠道 ≠ 渠道类型
 
@@ -120,6 +124,33 @@ status --manifest data/out/delivery-manifest.json
 `pay` 与 `reciprocal` 会以 `compliance: refused`（R-510）入库，域名就此关闭而非议价。
 退信把**地址**放进 180 天冷却，但不关闭该域名的另一条渠道。30 天内没有回执记
 `unanswered_no_receipt`——是未知，不是失败，也不是重发的理由。
+
+### 传输回执（L2）
+
+`sent` 只能证明发信商收下了信、并且能指名它。`poll-receipts` 把这个名字换成答案。
+
+```bash
+export BDL_PROVIDER=resend
+export BDL_PROVIDER_API_KEY=re_readonly_key
+
+python3 bin/delivery poll-receipts --records-dir data/records            # 只排提案
+python3 bin/delivery poll-receipts --records-dir data/records --auto-confirm
+python3 bin/delivery poll-receipts --provider resend --map-status complained
+```
+
+| 发信商状态词 | 结果 | 原因 |
+|---|---|---|
+| `delivered`、`opened`、`clicked` | `delivered` 事件 | 打开不可能先于送达 |
+| `bounced`、`complained` | `bounced` 事件 | 地址进入失联冷却 |
+| `delivery_delayed`、`queued` | `pending`，不落事件 | 仍在途中，不是结论 |
+| 401 / 404 / 429 / 5xx / 超时 / 未知词 | `unknown`，不落事件 | 读失败不是退信 |
+
+只查 `BDL_RECEIPT_WINDOW_DAYS` 内、带 provider id、且尚无定论回执的发送，因此轮询有界且幂等：
+定论以 `(provider id, action)` 为键，不用发信商并不精确的时间戳。全程只读：每封信一次带鉴权的
+GET，绝不重发。回执永不置 `live`。
+
+`--fixture <file>` 用录好的响应集替代真实调用，是在离线环境排练一次轮询的方式
+（见 `assets/provider-events.example.jsonl`）。
 
 ### 表单指纹注册表
 
@@ -154,7 +185,9 @@ status --manifest data/out/delivery-manifest.json
 }
 ```
 
-`data/out/receipts.jsonl` 为 append-only。两者都是派生产物，不是台账；`data/` 已加入 `.gitignore`。
+`data/out/receipts.jsonl` 为 append-only，`data/observations/transport-receipts.jsonl` 亦然
+（每封被查询的信一行，包括什么都没查到的那些）。前者记录「某次清单被生成」，后者记录
+「发信商说了什么」。两者都是派生产物，不是台账；`data/` 已加入 `.gitignore`。
 
 ## 7. 架构
 
@@ -166,10 +199,18 @@ bdl/services/                业务规则，不依赖 HTTP 类型与文件句柄
   cadence.py                 90 天窗、按域 24h 上限
   window.py                  观察窗排期、unknown != absent
   pipeline.py                编排
+  state.py                   事件流 -> 每 (域名, 渠道) 一个状态 + 计时器
+  record.py                  一条已校验、幂等的事件
+  observe.py / scan.py       L4 检测器与自动扫描
+  receipts.py                L2 回执的排期、拉取与落库
 bdl/adapters/                全部 I/O
   snapshot.py                契约 C 校验器
   prose.py                   带溯源的散文抽取
   outbox.py                  原子写、append-only 回执、历史读取
+  events.py                  append-only 投递事件日志
+  observation.py             观测台账与提案队列
+  forms.py                   表单指纹注册表
+  provider_events.py         发信商回执 API 读取器（可注入）
 bdl/config.py                集中环境变量校验、快速失败
 bdl/errors.py                类型化错误
 bdl/log.py                   结构化 JSON 日志 + 脱敏
@@ -196,7 +237,7 @@ PYTHONPATH=$PWD python3 -m unittest discover -s tests -t . -v
 python3 -m compileall -q bdl bin tests
 ```
 
-共 122 项离线单测与 CLI 测试，覆盖 schema 拒绝、CSV 导入映射、散文溯源、字段映射、节奏、观察窗、模板、历史对账、扫描/自动确认台账、事件幂等、状态投影与两个计时器、表单指纹、发送闸门、打包与 CLI 输出。测试不联网，也不 mock 服务层。
+共 169 项离线单测与 CLI 测试，覆盖 schema 拒绝、CSV 导入映射、散文溯源、字段映射、节奏、观察窗、模板、历史对账、扫描/自动确认台账、事件幂等、状态投影与两个计时器、表单指纹、发信商状态映射、回执轮询及其幂等、发送闸门、打包与 CLI 输出。测试不联网，也不 mock 服务层。
 
 ## 10. 分发
 
@@ -207,7 +248,7 @@ python3 -m compileall -q bdl bin tests
 - 表单提交与邮件发送（人工门，R-520 / R-530 tier B）。渲染出的文案只为审阅而生成，从不发送。
 - 写 `link-ledger.state`（单一人工写入器，R-512）。`scan --auto-confirm` 只在本地观察台账标 `live` 并排队提案。
 - 契约 C 的上游导出端（即 `backlink-prospector` 内部产出本包所消费快照的生产者）。
-- MX 解析与 provider 事件轮询（L2–L4 地址级别）。`record` 只接收人工或独立轮询器拿到的回执，自己不取。
+- MX 解析与 SMTP 级地址校验（L3）。`poll-receipts` 只读发信商已知的东西（L2），不探测邮箱。
 - 表单预填与自动提交。`forms register` 只存已复核的字段映射；填写与点提交仍是人工。
 - 回信解析。`record --action reply` 接收人工给出的分类；没有任何代码读邮箱。
 

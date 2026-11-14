@@ -1,13 +1,13 @@
 # 状态机、证据阶梯与观察窗
 
-> 实现状态：排期与判定已落在 `bdl/services/window.py`；页面抓取仍留给规则承载的观察 worker。英文主文档为 `state-and-evidence.md`。
+> 实现状态：排期与判定在 `bdl/services/window.py`；页面抓取在 `bdl/services/scan.py`（注入 `Fetcher`）；L2 回执轮询在 `bdl/services/receipts.py`。英文主文档为 `state-and-evidence.md`。
 
 ## 1. 四层证据阶梯
 
 | 层 | 可观测证据 | 本地可判定 | 写入位置 |
 |---|---|---|---|
 | L1 提交动作 | 表单 POST 的 2xx + 感谢页 URL + 截图；邮件 `accepted` + `provider_id` | 是 | `submitted_at`、`confirmation_ref`、evidence |
-| L2 传输回执 | `GET /emails/{id}` → `delivered` / `bounced` / `complained` | 是 | `outreach-receipts.json` |
+| L2 传输回执 | `GET /emails/{id}` → `delivered` / `bounced` / `complained` | 是 | `transport-receipts.jsonl` + 事件日志 |
 | L3 站点受理 | 对方后台是否收到、编辑是否审核 | **否** | 不写；`gaps` 记原因 |
 | L4 链接上线 | `target_url` HTML 中出现指向 `own_url` 的 `<a>` | 是（长时窗） | `live_at`、`verify` 快照 |
 
@@ -76,3 +76,24 @@ link-ledger.state      registered → submitted → approved → live → indexe
 - `approved`（编辑回复/目录通过）≠ `live`（R-512）；`live` 必须由抓取页面确认。
 - 页面 URL 归一化按 host + path 比较（`observed_href` 可能是相对路径或带 utm），否则产生假阴性。
 - `verify.content_hash` 只在 `found` 时钉死，用于区分真实删除与页面重建。
+
+## 6. 传输回执轮询
+
+`record --action sent` 硬拒没有 `provider_id` 的发送，因为无法指名的信无法对账。`poll-receipts` 是另一半：每封未结案的信一次带鉴权的 GET，映射进台账词汇。
+
+| 问题 | 代码里的答案 |
+|---|---|
+| 查哪些发送？ | `sent`、带 `provider_id`、在 `BDL_RECEIPT_WINDOW_DAYS` 内、且尚无定论回执 |
+| 什么算定论？ | 该 `(provider_id, action)` 已有 `delivered` 或 `bounced` 事件 |
+| 怎么防重复？ | 键是 `(provider_id, action)`，不用发信商时间戳——它不够精确，当幂等键会重写窗口锚点 |
+| 永不写入什么？ | 由读失败推出的 `bounced`；以及任何 `live` |
+| 结果落在哪？ | `transport-receipts.jsonl`（每封被查询的信，含无结论的）与（确认后的）事件日志 |
+
+映射纪律：
+
+- `delivered` / `opened` / `clicked` → `delivered`。打开不可能先于送达，把它当弱证据反而低估了发信商观测到的事实。
+- `bounced` / `complained` / `hardbounce` / `spamcomplaint` → `bounced`，把**地址**放进 `BDL_CONTACT_LOST_DAYS` 冷却；域名的另一条渠道仍开着。
+- `delivery_delayed` / `queued` / `softbounce` → `pending`，不落事件。仍在途中不是结论。
+- 401、403、404、429、5xx、超时、非 JSON 响应体、无法识别的状态词 → `unknown`，不落事件。这与 L4 观测器是同一种不对称：拒绝不等于缺席。因为 API 返回 429 就把一个活邮箱关 180 天，是这种错误的昂贵版本。
+
+回执只证明传输（L2），到此为止：不证明链接存在，不碰 `link-ledger.state`，也不构成重发许可。
