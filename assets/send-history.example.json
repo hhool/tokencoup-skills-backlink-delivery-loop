@@ -1,0 +1,16 @@
+{
+  "rows": [
+    {
+      "target_domain": "defer-example.com",
+      "event": "send",
+      "sent_at": "2026-11-10T09:00:00Z",
+      "state": "submitted"
+    },
+    {
+      "target_domain": "already-live.com",
+      "event": "send",
+      "sent_at": "2026-10-01T09:00:00Z",
+      "state": "live"
+    }
+  ]
+}

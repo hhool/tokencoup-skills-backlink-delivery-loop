@@ -1,0 +1,104 @@
+{
+  "center_domain": "soundbuttons.cc",
+  "schema_version": "1.0.0",
+  "generated_at": "2026-11-14T12:00:00Z",
+  "source": {
+    "repo": "tokencoup-skills-backlink-prospector",
+    "file": "data/store-soundbuttons.cc.json",
+    "content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "prospects": [
+    {
+      "domain": "beebom.com",
+      "url": "https://beebom.com",
+      "type_key": "industry_media",
+      "priority": 82,
+      "http_status": 200,
+      "acquired": false,
+      "is_competitor": false,
+      "is_gap": true,
+      "note": "",
+      "note_en": "Industry review site."
+    },
+    {
+      "domain": "assethoard.com",
+      "url": "https://assethoard.com",
+      "type_key": "resource",
+      "priority": 74,
+      "http_status": 200,
+      "acquired": false,
+      "is_competitor": false,
+      "is_gap": true
+    },
+    {
+      "domain": "toxigon.com",
+      "url": "https://toxigon.com",
+      "type_key": "industry_media",
+      "priority": 68,
+      "http_status": 200,
+      "acquired": false,
+      "is_competitor": false,
+      "is_gap": true
+    },
+    {
+      "domain": "launchingnext.com",
+      "url": "https://launchingnext.com",
+      "type_key": "directory",
+      "priority": 71,
+      "http_status": 200,
+      "acquired": false,
+      "is_competitor": false,
+      "is_gap": true
+    },
+    {
+      "domain": "reciprocal-example.com",
+      "url": "https://reciprocal-example.com",
+      "type_key": "reciprocal",
+      "priority": 60,
+      "http_status": 200,
+      "acquired": false,
+      "is_competitor": false,
+      "is_gap": true
+    },
+    {
+      "domain": "competitor-example.com",
+      "url": "https://competitor-example.com",
+      "type_key": "directory",
+      "priority": 70,
+      "http_status": 200,
+      "acquired": false,
+      "is_competitor": true,
+      "is_gap": false
+    },
+    {
+      "domain": "acquired-example.com",
+      "url": "https://acquired-example.com",
+      "type_key": "resource",
+      "priority": 55,
+      "http_status": 200,
+      "acquired": true,
+      "is_competitor": false,
+      "is_gap": false
+    },
+    {
+      "domain": "defer-example.com",
+      "url": "https://defer-example.com",
+      "type_key": "directory",
+      "priority": 52,
+      "http_status": 200,
+      "acquired": false,
+      "is_competitor": false,
+      "is_gap": true
+    },
+    {
+      "domain": "already-live.com",
+      "url": "https://already-live.com",
+      "type_key": "resource",
+      "priority": 66,
+      "http_status": 200,
+      "acquired": false,
+      "is_competitor": false,
+      "is_gap": true
+    }
+  ]
+}

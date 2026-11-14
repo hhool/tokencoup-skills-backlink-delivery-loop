@@ -1,0 +1,20 @@
+# Local state and build artefacts are never committed.
+data/
+out/
+*.tmp
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+venv/
+.coverage
+htmlcov/
+
+# Real configuration and credentials stay on the machine.
+.env
+*.key
+*.pem
+
+# Distribution artefacts.
+dist/
+*.zip
