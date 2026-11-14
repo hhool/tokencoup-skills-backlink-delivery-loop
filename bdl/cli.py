@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from dataclasses import replace
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -42,12 +43,21 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--submitted-at", required=True)
     plan.add_argument("--max-checks", type=int, default=window.MAX_CHECKS)
 
-    classify = sub.add_parser("classify", help="Classify one observation")
+    classify = sub.add_parser("classify", help="Classify one L4 observation (found/absent/timeout/robots)")
     classify.add_argument("--outcome", required=True, choices=["found", "absent", "timeout", "robots"])
     classify.add_argument("--http-status", type=int, required=True)
 
     package = sub.add_parser("package", help="Build a standalone distribution zip")
     package.add_argument("--out", default="", help="Output directory (default: ./dist)")
+
+    export = sub.add_parser(
+        "export-snapshot",
+        help="Export a versioned contract-C snapshot from a prospector store file",
+    )
+    export.add_argument("--store", required=True, help="Path to a backlink-prospector store-<domain>.json")
+    export.add_argument("--out", required=True, help="Write the snapshot document to this path")
+    export.add_argument("--repo", default="tokencoup-skills-backlink-prospector",
+                        help="Source repo label recorded in snapshot.source.repo")
     return parser
 
 
@@ -117,18 +127,34 @@ def _run(args: argparse.Namespace) -> dict:
         }
 
     if args.command == "package":
-        from pathlib import Path
-
         from .package import build_package
         candidate = cfg.home if (cfg.home / "SKILL.md").is_file() else Path(__file__).resolve().parents[1]
         archive = build_package(candidate, args.out or None)
-        return {"ok": True, "archive": str(archive), "bytes": archive.stat().st_size}
+        return {"ok": True, "archive": str(archive), "bytes": archive.stat().size}
 
-    return {
-        "ok": True,
-        "outcome": window.classify(args.outcome, args.http_status),
-        "note": "403, timeouts and robots refusals are unknown, not absent.",
-    }
+    if args.command == "classify":
+        return {
+            "ok": True,
+            "outcome": window.classify(args.outcome, args.http_status),
+            "note": "403, timeouts and robots refusals are unknown, not absent.",
+        }
+
+    if args.command == "export-snapshot":
+        from .adapters.prospector_export import export_snapshot
+
+        snapshot = export_snapshot(args.store, args.repo)
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {
+            "ok": True,
+            "out": str(out),
+            "center_domain": snapshot["center_domain"],
+            "prospects": len(snapshot["prospects"]),
+            "content_hash": snapshot["source"]["content_hash"],
+        }
+
+    raise DeliveryError("Unknown command", command=getattr(args, "command", ""))
 
 
 def main(argv: Optional[List[str]] = None) -> int:

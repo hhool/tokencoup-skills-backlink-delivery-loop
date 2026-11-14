@@ -34,13 +34,17 @@ page and produces systematic false negatives.
 ## Workflow
 
 1. `doctor` - validate configuration, confirm the transmission gate is closed.
-2. `validate-snapshot --file <export>` - verify schema version, hash and center domain.
-3. `build-manifest --snapshot <export> --history <send-history.json>` - read the
+2. `export-snapshot --store <prospector store-<domain>.json> --out <snapshot.json>` -
+   the contract-C producer. Reads a backlink-prospector store and emits a versioned
+   snapshot. The consumer never touches the prospector layout; this command is the
+   only bridge.
+3. `validate-snapshot --file <export>` - verify schema version, hash and center domain.
+4. `build-manifest --snapshot <export> --history <send-history.json>` - read the
    snapshot, join prose-derived contacts, apply admission and cadence rules, then
    write `delivery-manifest.json` and an append-only `receipts.jsonl`.
-4. A human reviews each `ready_for_review` row. No tool acts on it automatically.
-5. `plan-window --submitted-at <iso>` - compute the T+1/3/7/14/30 day fetch schedule.
-6. `classify --outcome ... --http-status ...` - record an observation. A 403, timeout
+5. A human reviews each `ready_for_review` row. No tool acts on it automatically.
+6. `plan-window --submitted-at <iso>` - compute the T+1/3/7/14/30 day fetch schedule.
+7. `classify --outcome ... --http-status ...` - record an observation. A 403, timeout
    or robots refusal is `unknown`, never `absent`.
 
 ## Statuses
