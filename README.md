@@ -80,11 +80,12 @@ On the sample fixture the manifest reports 9 rows: 3 `ready_for_review`,
 | Command | Purpose |
 |---|---|
 | `doctor` | Validate config, print paths and policy state |
-| `export-snapshot --store ... --out ...` | Contract-C producer: read a prospector store, emit a versioned snapshot |
+| `export-snapshot --store ... --out ... [--enrichment ...]` | Contract-C producer: read a prospector store, fold in a discovery overlay, emit a versioned snapshot |
 | `import-prospects --csv ... [--out ...] [--dry-run]` | Read a prospector CSV export (the richer surface: it carries `is_gap`), report the mapping, emit a snapshot |
 | `validate-snapshot --file ...` | Enforce the snapshot contract |
 | `build-manifest --snapshot ... [--history ...] [--history-dir ...]` | Produce the review artefact + receipt; embeds rendered copy per row |
 | `render-template --channel-type ... --context-json ...` | Preview outbound copy a row would receive |
+| `draft --manifest ... [--from ...] [--ceiling ...] [--dry-run]` | Render email rows into sendable `.eml` files, refusing near-duplicate copy |
 | `lookup --target-domain ... [--history ...] [--history-dir ...]` | Reconcile recorded sends for one target domain |
 | `record --target-domain ... --channel form\|email --action ...` | Record one delivery action; append-only and idempotent |
 | `poll-receipts --provider resend\|postmark [--auto-confirm] [--dry-run]` | Read provider events for unresolved sends (L2, one GET each) |
@@ -166,6 +167,48 @@ authenticated GET per message, nothing resent. A receipt never sets `live`.
 `--fixture <file>` replays a recorded response set instead of calling the API, which
 is how a poll is rehearsed offline (see `assets/provider-events.example.jsonl`).
 
+### Discovery, and why the pool stops being empty
+
+The pool carries domains, not channels: `submission_url` and `contact_email` were
+blank for every candidate, and nothing in this package can invent them. They are
+observed by `tools/discover_entry.py` in the prospector repo (read-only, robots
+aware, cached) and folded in at export time as contract C 1.1.0:
+
+```bash
+python3 ../backlink-prospector/tools/discover_entry.py \
+    --store ../backlink-prospector/data/store-soundbuttons.cc.json \
+    --out ../backlink-prospector/data/enrichment-soundbuttons.cc.json --resume
+
+python3 bin/delivery export-snapshot --store ...store-soundbuttons.cc.json \
+    --enrichment ...enrichment-soundbuttons.cc.json --out data/snapshots/snapshot.json
+```
+
+Two consequences worth knowing:
+
+- A row can now be `ready_to_submit` without a landing page. `target_url` is the page
+  a link should appear on, and a directory has no listing page until it publishes one.
+  Requiring it before submitting stalled every directory row behind an unknowable
+  future value; submission and observation are separate gates.
+- `no_channel` is a finished row, not a pending one: discovery observed the site and
+  found neither a form nor an address. `needs_enrichment` still means nobody looked.
+
+`BDL_OWN_LANDING_URL` fills `own_url` for every row, because it is the same value for
+the whole pool — without it every row stalls on a per-row fact that is not per-row.
+
+### Drafting (L1 preparation, not transmission)
+
+`draft` writes one `.eml` per emailable row: subject and body from the channel
+template, `X-BDL-*` provenance headers, a deterministic `Message-ID`. Sending is still
+a human action.
+
+The interesting part is the footprint guard. A hundred directories receiving the same
+paragraph is one paragraph sent a hundred times, so each channel carries several
+bodies and the draft picks the first whose 5-word-shingle similarity to copy already
+drafted **in this batch** stays under `--ceiling` (default 0.80). The comparison masks
+domains and URLs first: one template with the domain swapped scores about 0.76 raw,
+slips under a naive 0.80 threshold, and is the same paragraph to a duplicate detector.
+A near duplicate is skipped with the closest domain and the score, never merged.
+
 ### Form fingerprint registry
 
 A form is identified by `sha256(method + action path + sorted field names)`, not by
@@ -243,7 +286,8 @@ atomic writes, idempotency keys, structured logs, no secrets in YAML/JSON.
 
 ## 8. Contracts and policy
 
-- `contracts/prospect-snapshot.schema.json` - upstream snapshot, version `1.0.0`.
+- `contracts/prospect-snapshot.schema.json` - upstream snapshot, version `1.1.0`
+  (`1.0.0` still validates; discovery fields are refused under the old label).
 - `references/upstream-contract.md` - field mapping and why `url` is not `target_url`.
 - `references/state-and-evidence.md` - L1-L4, ledger fields, observation window.
 - `references/rule-boundary.md` - R-520 / R-530 decision and rule-change cost.
@@ -258,7 +302,7 @@ PYTHONPATH=$PWD python3 -m unittest discover -s tests -t . -v
 python3 -m compileall -q bdl bin tests
 ```
 
-172 offline unit and CLI tests cover schema rejection, CSV import mapping, prose
+211 offline unit and CLI tests cover schema rejection, CSV import mapping, prose
 provenance, field mapping, cadence, the observation window, templates, history
 reconciliation, the scan/auto-confirm ledger, event idempotency, the state
 projection and its two timers, form fingerprints, provider status mapping, receipt

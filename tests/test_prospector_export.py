@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from bdl.adapters.prospector_export import export_snapshot
+from bdl import CONTRACTS_VERSION
+from bdl.adapters.prospector_export import export_snapshot, load_enrichment
 from bdl.adapters.snapshot import load_snapshot
 from bdl.errors import SnapshotError
 
@@ -57,7 +58,7 @@ class TestExportSnapshot(unittest.TestCase):
             store_file_name = src.name
 
         self.assertEqual(snap["center_domain"], "soundbuttons.cc")
-        self.assertEqual(snap["schema_version"], "1.0.0")
+        self.assertEqual(snap["schema_version"], CONTRACTS_VERSION)
         self.assertEqual(len(snap["prospects"]), 2)
 
         by_domain = {p["domain"]: p for p in snap["prospects"]}

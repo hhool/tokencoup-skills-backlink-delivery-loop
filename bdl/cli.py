@@ -77,6 +77,12 @@ def _parser() -> argparse.ArgumentParser:
     export.add_argument("--out", required=True, help="Write the snapshot document to this path")
     export.add_argument("--repo", default="tokencoup-skills-backlink-prospector",
                         help="Source repo label recorded in snapshot.source.repo")
+    export.add_argument(
+        "--enrichment",
+        default="",
+        help="Discovery overlay from backlink-prospector tools/discover_entry.py "
+        "(adds submission_url and contact_email to the snapshot)",
+    )
 
     imp = sub.add_parser(
         "import-prospects",
@@ -128,6 +134,19 @@ def _parser() -> argparse.ArgumentParser:
     poll.add_argument("--actor", default="provider-poll")
     poll.add_argument("--map-status", default="",
                       help="Print how one provider status word maps, e.g. --map-status bounced")
+
+    draft = sub.add_parser(
+        "draft",
+        help="Draft sendable .eml files from a manifest (writes files, never sends)",
+    )
+    draft.add_argument("--manifest", required=True, help="delivery-manifest.json")
+    draft.add_argument("--out", default="", help="Directory for the .eml files")
+    draft.add_argument("--from", dest="from_addr", default="", help="From address (or BDL_FROM_EMAIL)")
+    draft.add_argument("--from-name", default="", help="Display name for the From header")
+    draft.add_argument("--ceiling", type=float, default=0.80,
+                       help="Refuse a draft this similar to one already drafted (0-1)")
+    draft.add_argument("--domain", default="", help="Draft only this target domain")
+    draft.add_argument("--dry-run", action="store_true", help="Render and check, write nothing")
 
     st = sub.add_parser("status", help="Current state per domain and channel, folded from the event log")
     st.add_argument("--records-dir", default="")
@@ -333,15 +352,25 @@ def _run(args: argparse.Namespace) -> dict:
     if args.command == "export-snapshot":
         from .adapters.prospector_export import export_snapshot
 
-        snapshot = export_snapshot(args.store, args.repo)
+        diagnostics: dict = {}
+        snapshot = export_snapshot(
+            args.store, args.repo, diagnostics=diagnostics, enrichment_path=args.enrichment
+        )
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+        with_channel = sum(
+            1 for item in snapshot["prospects"]
+            if item.get("submission_url") or item.get("contact_email")
+        )
         return {
             "ok": True,
             "out": str(out),
             "center_domain": snapshot["center_domain"],
+            "schema_version": snapshot["schema_version"],
             "prospects": len(snapshot["prospects"]),
+            "enriched": diagnostics.get("enriched", 0),
+            "with_channel": with_channel,
             "content_hash": snapshot["source"]["content_hash"],
         }
 
@@ -490,6 +519,51 @@ def _run(args: argparse.Namespace) -> dict:
             "status stays unknown, never bounced."
         )
         return {"ok": True, **result}
+
+    if args.command == "draft":
+        from dataclasses import fields as dataclass_fields
+
+        from .models import ManifestRow
+        from .services.draft import draft_batch
+
+        source = Path(args.manifest)
+        if not source.is_file():
+            raise ConfigError("Manifest not found", path=str(source))
+        manifest = json.loads(source.read_text(encoding="utf-8"))
+        known = {item.name for item in dataclass_fields(ManifestRow)}
+        rows = [
+            ManifestRow(**{key: value for key, value in item.items() if key in known})
+            for item in manifest.get("rows", [])
+            if isinstance(item, dict)
+        ]
+        if args.domain:
+            rows = [row for row in rows if row.target_domain == args.domain]
+
+        from_addr = args.from_addr or cfg.from_email
+        if not from_addr:
+            raise ConfigError(
+                "A From address is required to draft mail",
+                env="BDL_FROM_EMAIL",
+                hint="The address a recipient would reply to",
+            )
+        center = manifest.get("center_domain") or cfg.center_domain
+        report = draft_batch(
+            rows,
+            templates=TemplateSet.load(cfg.templates_dir, center),
+            center_domain=center,
+            own_site_base=cfg.own_site_base,
+            from_addr=from_addr,
+            out_dir=args.out or str(cfg.out_dir / "drafts"),
+            from_name=args.from_name or cfg.from_name,
+            ceiling=args.ceiling,
+            write=not args.dry_run,
+        )
+        logger.emit(
+            "drafts_built",
+            drafted=report["counts"]["drafted"],
+            duplicates_blocked=report["counts"]["duplicates_blocked"],
+        )
+        return {"ok": True, "dry_run": bool(args.dry_run), "from": from_addr, **report}
 
     if args.command == "status":
         from .adapters.events import load_events, normalise_legacy

@@ -50,6 +50,7 @@ def build_manifest(
         moment,
         deferral_days=cfg.deferral_window_days,
         templates=templates,
+        own_landing_url=cfg.own_landing_url,
     )
     counts = Counter(row.status for row in rows)
 

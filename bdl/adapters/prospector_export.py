@@ -29,8 +29,22 @@ from typing import Any, Dict, List
 
 from .. import CONTRACTS_VERSION
 from ..errors import SnapshotError
+from ..models import normalize_domain
 
 PROSPECTOR_REPO = "tokencoup-skills-backlink-prospector"
+
+# Discovery fields copied from an enrichment file when one is supplied. They are
+# observations of the site, so the producer never invents them: a missing key
+# stays absent rather than becoming an empty string that reads like "not found".
+_ENRICH_KEYS = (
+    "submission_url",
+    "form_shape",
+    "form_fields",
+    "contact_email",
+    "contact_source",
+    "contact_source_url",
+    "enriched_at",
+)
 
 
 def _now() -> str:
@@ -53,16 +67,48 @@ def _coerce_int(value: Any, default: int) -> int:
     return default
 
 
+def load_enrichment(path: str | Path) -> Dict[str, Dict[str, Any]]:
+    """Read a discovery overlay keyed by registrable host.
+
+    The overlay is produced by ``tools/discover_entry.py`` in the prospector repo.
+    Keeping it a separate file means discovery can be re-run without rewriting the
+    store, and an export without an overlay is still a valid 1.1.0 snapshot.
+    """
+    src = Path(path)
+    if not src.is_file():
+        raise SnapshotError("Enrichment file not found", path=str(src))
+    try:
+        doc = json.loads(src.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SnapshotError(
+            "Enrichment file is not valid JSON", path=str(src), line=exc.lineno
+        ) from exc
+    if not isinstance(doc, dict):
+        raise SnapshotError("Enrichment root must be an object", path=str(src))
+    domains = doc.get("domains")
+    if not isinstance(domains, dict):
+        raise SnapshotError("Enrichment file is missing the domains map", path=str(src))
+    index: Dict[str, Dict[str, Any]] = {}
+    for key, record in domains.items():
+        if not isinstance(record, dict):
+            continue
+        host = normalize_domain(str(record.get("domain") or key))
+        if host:
+            index[host] = record
+    return index
+
+
 def export_snapshot(
     store_path: str | Path,
     repo: str = PROSPECTOR_REPO,
     diagnostics: Dict[str, Any] | None = None,
+    enrichment_path: str | Path = "",
 ) -> Dict[str, Any]:
     """Read a prospector store file and return a contract-C snapshot dict.
 
     ``diagnostics``, when supplied, is filled with provenance that cannot live
     inside the snapshot (the contract is closed): how many ``is_gap`` values were
-    passed through versus derived.
+    passed through versus derived, and how many prospects discovery reached.
     """
     src = Path(store_path)
     if not src.is_file():
@@ -86,6 +132,9 @@ def export_snapshot(
 
     prospects: List[Dict[str, Any]] = []
     basis_counts: Dict[str, int] = {}
+    overlay = load_enrichment(enrichment_path) if enrichment_path else {}
+    enriched = 0
+    with_channel = 0
     for domain_key, record in domains.items():
         if not isinstance(record, dict):
             continue
@@ -118,7 +167,7 @@ def export_snapshot(
             is_gap = (not acquired) and (not is_competitor)
             gap_basis = "derived"
 
-        prospects.append({
+        entry = {
             "domain": domain,
             "url": url,
             "type_key": type_key,
@@ -131,12 +180,25 @@ def export_snapshot(
             "note_en": "",
             "first_seen": record.get("first_seen"),
             "last_seen": record.get("last_seen"),
-        })
+        }
+        found = overlay.get(normalize_domain(domain)) if overlay else None
+        if found:
+            for key in _ENRICH_KEYS:
+                if key in found and found[key] is not None:
+                    entry[key] = found[key]
+            if found.get("enriched_at"):
+                enriched += 1
+            if found.get("submission_url") or found.get("contact_email"):
+                with_channel += 1
+        prospects.append(entry)
         basis_counts[gap_basis] = basis_counts.get(gap_basis, 0) + 1
 
     if diagnostics is not None:
         diagnostics["is_gap_basis"] = dict(sorted(basis_counts.items()))
         diagnostics["prospects"] = len(prospects)
+        diagnostics["enriched"] = enriched
+        diagnostics["with_channel"] = with_channel
+        diagnostics["enrichment_file"] = Path(enrichment_path).name if enrichment_path else ""
 
     return {
         "center_domain": center,

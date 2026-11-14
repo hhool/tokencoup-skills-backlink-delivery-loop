@@ -14,7 +14,7 @@
 
 `contracts/prospect-snapshot.schema.json`（JSON Schema 2020-12）。运行时校验器 `bdl/adapters/snapshot.py` 用纯标准库执行同一套规则：
 
-- `schema_version` 必须等于 `1.0.0`；未知版本拒绝而非忽略。
+- `schema_version` 必须是 `1.0.0` 或 `1.1.0`；未知版本拒绝而非忽略。`1.0.0` 文档里出现发现字段同样拒绝：否则版本号就是关于「这份文档能装什么」的谎言。
 - 任意层级的未知字段一律拒绝（`additionalProperties: false` 语义）。
 - `source.content_hash` 必须形如 `sha256:<64 hex>`。
 - `center_domain` 必须与请求的中心域名一致。
@@ -66,3 +66,24 @@
 4. 破坏性字段变更时提升 `schema_version`；消费方拒绝未知版本，而不是静默丢弃字段。
 
 缺失数据在上游报 `unavailable`、在本包报 `gap`；两边都不用 0、false 或估计值顶替。
+
+## 7. 1.1.0 的发现区块
+
+版本 1.1.0 为每个候选增加七个**可选**字段。全部来自 prospector 仓库里 `tools/discover_entry.py` 对站点的只读观测，经 `export-snapshot --enrichment` 传入。都不是必填，所以 1.0.0 的生产端不改也能继续用。
+
+| 字段 | 含义 | 缺失意味着 |
+|---|---|---|
+| `submission_url` | 承载可用表单的页面绝对 URL | 没人去看过 |
+| `form_shape` | `sha256(方法 + 排序后的语义槽位)`——复用键，跑同一插件的站共享 | 没观测到表单 |
+| `form_fields` | 线上字段名，含隐藏令牌 | 没观测到表单 |
+| `contact_email` | 站点上实际出现的地址 | 没人去看过 |
+| `contact_source` | `mailto` / `obfuscated` / `prose` / `form_page` / `manual` | 无地址 |
+| `contact_source_url` | 读到该地址的页面 | 无地址 |
+| `enriched_at` | 该轮发现的时间 | 从未观测 |
+
+两条规则让这个区块可用：
+
+**缺失不等于空。** `submission_url` 为空表示没去看、或在**页面预算内**没找到，不表示该站没有表单。叠加层里记了页数与 note，读者能区分「没看」与「看了没有」。manifest 里的 `no_channel` 只表示后者。
+
+**发现优先于散文，反过来不成立。** 散文是某个时间点的人工记录，发现是某个时间点对站点的观测。两者并存时以站点为准，因为提交真正打的是站点。但散文仍补空缺：只有散文邮箱、没有发现渠道的域名照样可用。
+

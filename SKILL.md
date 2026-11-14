@@ -77,9 +77,12 @@ not in context and any CJK in email copy (R-522).
 
 1. `doctor` - validate configuration, confirm the transmission gate is closed.
 2. Produce a snapshot from the prospector, one of two ways:
-   - `export-snapshot --store <prospector store-<domain>.json> --out <snapshot.json>` -
-     reads the internal store. It carries no `is_gap` column, so that field is
-     derived ("not acquired and not a competitor") and the derivation is reported.
+   - `export-snapshot --store <prospector store-<domain>.json> --out <snapshot.json>
+     [--enrichment <data/enrichment-<center>.json>]` - reads the internal store. It
+     carries no `is_gap` column, so that field is derived ("not acquired and not a
+     competitor") and the derivation is reported. `--enrichment` folds in the
+     read-only discovery overlay (contract C 1.1.0): `submission_url`, `form_shape`,
+     `contact_email` and their provenance.
    - `import-prospects --csv <backlink-prospects-<domain>-<stamp>.csv> --out <snapshot.json>`
      - reads the UI export, which DOES carry `is_gap`. That value is passed through,
      because it encodes upstream judgements this tool cannot reproduce (a
@@ -98,14 +101,28 @@ not in context and any CJK in email copy (R-522).
    template before relying on it.
 6. `lookup --target-domain <domain> [--history ...] [--history-dir ...]` - reconcile
    recorded sends/observations for one target domain across all history sources.
-7. A human reviews each `ready_for_review` row. No tool acts on it automatically.
-8. `record --target-domain <d> --channel <form|email> --action <...>` - write the
+7. A human reviews the rows. `ready_for_review` has a channel *and* a known landing
+   page; `ready_to_submit` has a channel but no landing page yet, which is normal for
+   a directory that only publishes a listing after it accepts you. `no_channel` means
+   discovery observed the site and found neither a form nor an address - that row is
+   finished, not pending. No tool acts on any of them automatically.
+8. `draft --manifest <delivery-manifest.json> --out <dir> [--from <addr>]
+   [--ceiling 0.80] [--domain <d>] [--dry-run]` - turn the manifest's email rows into
+   `.eml` files. Subject and body come from the channel template; provenance travels
+   in `X-BDL-*` headers and a deterministic `Message-ID`. Templates carry several
+   bodies per channel, and the draft picks the first one whose 5-word-shingle
+   similarity to copy already drafted **in this batch** stays under the ceiling -
+   measured with domains and URLs masked, because one template with the domain
+   swapped still scores ~0.76 raw and is the same paragraph to a duplicate detector.
+   A near duplicate is skipped with the closest domain and the score, never merged.
+   Nothing is transmitted: a draft is a file.
+9. `record --target-domain <d> --channel <form|email> --action <...>` - write the
    action a human actually performed. Append-only and idempotent: a repeated event
    id is refused. A `sent` needs `--provider-id`; a `submitted` needs `--evidence`;
    a `reply` needs `--reply-class yes|no|pay|reciprocal`. `pay` and `reciprocal`
    are recorded and flagged `compliance: refused` (R-510) - the domain is closed,
    not negotiated.
-9. `poll-receipts --provider <resend|postmark> [--auto-confirm] [--dry-run]` - ask the
+10. `poll-receipts --provider <resend|postmark> [--auto-confirm] [--dry-run]` - ask the
    sending provider what happened to each unresolved send. One GET per message, only
    for sends inside `BDL_RECEIPT_WINDOW_DAYS` that carry a provider id and have no
    resolving receipt yet. `delivered` and `bounced` become events; `pending` and
@@ -115,24 +132,24 @@ not in context and any CJK in email copy (R-522).
    unrecognised status word is `unknown`, never a bounce - a rate-limited API must
    not close a live mailbox for 180 days. `--map-status <word>` prints the mapping
    for one provider status without calling anything.
-10. `status [--manifest <file>] [--channel <form|email>] [--target-domain <d>]` -
+11. `status [--manifest <file>] [--channel <form|email>] [--target-domain <d>]` -
     fold the event log into one current state per `(target_domain, channel)` and
     answer "in delivery / delivered / live". Every state carries a `next_action`
     and, where a timer applies, `window.due_at`. Seeding from a manifest turns
     untouched (non-blocked) targets into `not_started` rows so nothing is invisible.
-11. `forms list|show|register|check` - the form fingerprint registry. A form is
+12. `forms list|show|register|check` - the form fingerprint registry. A form is
     identified by `sha256(method + action path + sorted field names)`, never by
     domain alone: a site's contact form and its submission form have different
     fields. An unseen fingerprint reports `needs_human_verify`; `register` demands
     `--reviewed-by`, and a CAPTCHA or login-gated form is stored as `manual_only`.
-12. `plan-window --submitted-at <iso>` - compute the T+1/3/7/14/30 day fetch schedule.
-13. `classify --outcome ... --http-status ...` - record an observation. A 403, timeout
+13. `plan-window --submitted-at <iso>` - compute the T+1/3/7/14/30 day fetch schedule.
+14. `classify --outcome ... --http-status ...` - record an observation. A 403, timeout
     or robots refusal is `unknown`, never `absent`.
-14. `observe --target-url <page> --own-url <our-url>` - the local L4 detector. A single
+15. `observe --target-url <page> --own-url <our-url>` - the local L4 detector. A single
     read-only GET; finds an anchor to the own host (`found`), reports `absent` only on
     a 2xx page with no such anchor, and reports `unknown` on any fetch failure (403,
     timeout, robots). Use `--record <file>` to append the observation as JSONL.
-15. `scan --manifest <delivery-manifest.json> [--auto-confirm] [--out <dir>]` - the
+16. `scan --manifest <delivery-manifest.json> [--auto-confirm] [--out <dir>]` - the
     auto-scan. For every observable row (has `target_url` + `own_url`), run the L4
     detector, append the result to `observations.jsonl`, and classify. With
     `--auto-confirm` (or `BDL_AUTO_CONFIRM=true`), a `found` link is marked `live`

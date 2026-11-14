@@ -72,10 +72,24 @@ class Prospect:
     note_en: str = ""
     first_seen: Optional[str] = None
     last_seen: Optional[str] = None
+    # Contract C 1.1.0 discovery block. Absent means "nobody looked", not "none
+    # exists": an empty value here must never be read as evidence of absence.
+    submission_url: Optional[str] = None
+    form_shape: Optional[str] = None
+    form_fields: Optional[List[str]] = None
+    contact_email: Optional[str] = None
+    contact_source: Optional[str] = None
+    contact_source_url: Optional[str] = None
+    enriched_at: Optional[str] = None
 
     @property
     def key(self) -> str:
         return normalize_domain(self.domain)
+
+    @property
+    def discovered(self) -> bool:
+        """True when a discovery pass looked at this domain."""
+        return bool(self.enriched_at)
 
 
 @dataclass

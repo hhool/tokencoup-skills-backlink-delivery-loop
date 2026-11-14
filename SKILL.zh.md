@@ -68,15 +68,16 @@ agent_created: true
 4. `build-manifest --snapshot <export> --history <file> --history-dir <dir>` —— 读取快照、join 散文联系地址、应用准入与节奏规则、用模板集渲染每行的出站文案，写出 `delivery-manifest.json` 与 append-only 的 `receipts.jsonl`。历史可来自主文件与/或某个目录，全部聚合。
 5. `render-template --channel-type <type> --context-json <obj>` —— 预览某行将收到的确切出站文案，不写任何文件。用于在依赖模板前先复核。
 6. `lookup --target-domain <domain> [--history ...] [--history-dir ...]` —— 跨所有历史源，对单个目标域名对账已记录的发送/观测。
-7. 人工逐条审阅 `ready_for_review` 行；任何工具都不得自动执行。
-8. `record --target-domain <d> --channel <form|email> --action <...>` —— 记录人工**实际执行**的动作。append-only 且幂等：重复的事件 id 会被拒绝而不是重复写入。`sent` 必须带 `--provider-id`；`submitted` 必须带 `--evidence`；`reply` 必须带 `--reply-class yes|no|pay|reciprocal`。`pay` 与 `reciprocal` 会被记录并标记 `compliance: refused`（R-510）——域名就此关闭，不进入议价。
-9. `poll-receipts --provider <resend|postmark> [--auto-confirm] [--dry-run]` —— 向发信商查每个未结案发送的结局。每封信一次 GET，只查「在 `BDL_RECEIPT_WINDOW_DAYS` 内、带 provider id、且尚无定论回执」的发送。`delivered` 与 `bounced` 落成事件；`pending` 与 `unknown` 什么都不写。回执台账写进 `transport-receipts.jsonl`。不加 `--auto-confirm`（且 `BDL_AUTO_CONFIRM=false`）时，事件只排队进 `receipt-proposals.jsonl` 等人工确认。401、404、429、5xx、超时或无法识别的状态词一律记 `unknown`，绝不当退信——被限流的 API 不能把一个活邮箱关 180 天。`--map-status <word>` 只打印某个发信商状态词的映射，不发起调用。
-10. `status [--manifest <file>] [--channel <form|email>] [--target-domain <d>]` —— 把事件日志折叠成每个 `(target_domain, channel)` 的当前状态，回答「投放中 / 已投递 / 已上线」。每个状态都带 `next_action`，涉及计时的还带 `window.due_at`。用 manifest 播种时，未被 block 的目标会以 `not_started` 出现，不会有行凭空消失。
-11. `forms list|show|register|check` —— 表单指纹注册表。表单由 `sha256(方法 + action 路径 + 排序后的字段名)` 识别，绝不只看域名：同一站的「联系我们」与「提交资源」字段不同。未见过指纹返回 `needs_human_verify`；`register` 强制要求 `--reviewed-by`，带验证码或需登录的表单存为 `manual_only`。
-12. `plan-window --submitted-at <iso>` —— 计算 T+1/3/7/14/30 天抓取排期。
-13. `classify --outcome ... --http-status ...` —— 记录一次观测。403、超时、robots 拒绝记 `unknown`，绝不记 `absent`。
-14. `observe --target-url <page> --own-url <our-url>` —— 本地 L4 检测器。仅一次只读 GET：找到指向自身主机的锚点记 `found`；2xx 页面但无该锚点记 `absent`；任何抓取失败（403、超时、robots）记 `unknown`。可用 `--record <file>` 把观测追加为 JSONL。
-15. `scan --manifest <delivery-manifest.json> [--auto-confirm] [--out <dir>]` —— 自动扫描。对每个可观测行（含 `target_url` + `own_url`）跑 L4 检测，把结果追加进 `observations.jsonl` 并分类。加 `--auto-confirm`（或 `BDL_AUTO_CONFIRM=true`）时，命中的链接在本地标 `live` 并把确认提案排队进 `confirm-proposals.jsonl`。把共享 link-ledger 标记为 `live` 仍是独立的、需人工确认的 SEXTANT 步骤。
+7. 人工审阅这些行。`ready_for_review` = 有渠道**且**已知落地页；`ready_to_submit` = 有渠道但落地页未知——目录站本来就要等它收录后才产生 listing 页，所以提交与观测是两道闸，不是一道。`no_channel` 表示发现流程已看过该站且既无表单也无邮箱，这行是**结束**，不是待办。任何工具都不得自动执行。
+8. `draft --manifest <delivery-manifest.json> --out <dir> [--from <addr>] [--ceiling 0.80] [--domain <d>] [--dry-run]` —— 把 manifest 里的邮件行渲染成可发送的 `.eml` 文件。主题与正文来自渠道模板；来源信息写进 `X-BDL-*` 头与确定性的 `Message-ID`。每个渠道带多份正文，draft 会挑第一份「与**本批次已产出**文案的 5 词 shingle 相似度低于阈值」的；比较前先掩掉域名与 URL——同一模板只换域名，原始相似度约 0.76，会从朴素的 0.80 阈值下溜过去，而对去重器来说就是同一段话。近似重复一律跳过并报出最接近的域名与分数，绝不合并。全程不传输：draft 只是一个文件。
+9. `record --target-domain <d> --channel <form|email> --action <...>` —— 记录人工**实际执行**的动作。append-only 且幂等：重复的事件 id 会被拒绝而不是重复写入。`sent` 必须带 `--provider-id`；`submitted` 必须带 `--evidence`；`reply` 必须带 `--reply-class yes|no|pay|reciprocal`。`pay` 与 `reciprocal` 会被记录并标记 `compliance: refused`（R-510）——域名就此关闭，不进入议价。
+10. `poll-receipts --provider <resend|postmark> [--auto-confirm] [--dry-run]` —— 向发信商查每个未结案发送的结局。每封信一次 GET，只查「在 `BDL_RECEIPT_WINDOW_DAYS` 内、带 provider id、且尚无定论回执」的发送。`delivered` 与 `bounced` 落成事件；`pending` 与 `unknown` 什么都不写。回执台账写进 `transport-receipts.jsonl`。不加 `--auto-confirm`（且 `BDL_AUTO_CONFIRM=false`）时，事件只排队进 `receipt-proposals.jsonl` 等人工确认。401、404、429、5xx、超时或无法识别的状态词一律记 `unknown`，绝不当退信——被限流的 API 不能把一个活邮箱关 180 天。`--map-status <word>` 只打印某个发信商状态词的映射，不发起调用。
+11. `status [--manifest <file>] [--channel <form|email>] [--target-domain <d>]` —— 把事件日志折叠成每个 `(target_domain, channel)` 的当前状态，回答「投放中 / 已投递 / 已上线」。每个状态都带 `next_action`，涉及计时的还带 `window.due_at`。用 manifest 播种时，未被 block 的目标会以 `not_started` 出现，不会有行凭空消失。
+12. `forms list|show|register|check` —— 表单指纹注册表。表单由 `sha256(方法 + action 路径 + 排序后的字段名)` 识别，绝不只看域名：同一站的「联系我们」与「提交资源」字段不同。未见过指纹返回 `needs_human_verify`；`register` 强制要求 `--reviewed-by`，带验证码或需登录的表单存为 `manual_only`。
+13. `plan-window --submitted-at <iso>` —— 计算 T+1/3/7/14/30 天抓取排期。
+14. `classify --outcome ... --http-status ...` —— 记录一次观测。403、超时、robots 拒绝记 `unknown`，绝不记 `absent`。
+15. `observe --target-url <page> --own-url <our-url>` —— 本地 L4 检测器。仅一次只读 GET：找到指向自身主机的锚点记 `found`；2xx 页面但无该锚点记 `absent`；任何抓取失败（403、超时、robots）记 `unknown`。可用 `--record <file>` 把观测追加为 JSONL。
+16. `scan --manifest <delivery-manifest.json> [--auto-confirm] [--out <dir>]` —— 自动扫描。对每个可观测行（含 `target_url` + `own_url`）跑 L4 检测，把结果追加进 `observations.jsonl` 并分类。加 `--auto-confirm`（或 `BDL_AUTO_CONFIRM=true`）时，命中的链接在本地标 `live` 并把确认提案排队进 `confirm-proposals.jsonl`。把共享 link-ledger 标记为 `live` 仍是独立的、需人工确认的 SEXTANT 步骤。
 
 ## 投影状态
 

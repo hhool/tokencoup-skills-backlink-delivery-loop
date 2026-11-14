@@ -19,7 +19,9 @@ no runtime dependency on the upstream HTTP service.
 validator in `bdl/adapters/snapshot.py` enforces the same rules using only the
 standard library:
 
-- `schema_version` must equal `1.0.0`; an unknown version is refused, not ignored.
+- `schema_version` must be `1.0.0` or `1.1.0`; an unknown version is refused, not
+  ignored. A discovery field inside a `1.0.0` document is refused too: the version
+  label would otherwise be a lie about what the document can contain.
 - Unknown keys at any level are refused (`additionalProperties: false` semantics).
 - `source.content_hash` must be `sha256:<64 hex>`.
 - `center_domain` must match the requested center domain.
@@ -81,3 +83,33 @@ Not implemented in this repository. The upstream should:
 
 Missing data is reported as `unavailable` (upstream) or `gap` (here); neither side
 substitutes 0, false or an estimate.
+
+## 7. The 1.1.0 discovery block
+
+Version 1.1.0 adds seven **optional** fields per prospect. All of them are
+observations of the site made by `tools/discover_entry.py` in the prospector repo,
+carried through `export-snapshot --enrichment`. None is required, so a 1.0.0 producer
+keeps working unchanged.
+
+| Field | Meaning | Absent means |
+|---|---|---|
+| `submission_url` | absolute URL of a page hosting a usable form | nobody looked |
+| `form_shape` | `sha256(method + sorted semantic slots)` - the reuse key, shared across sites running the same plugin | no form observed |
+| `form_fields` | wire field names, hidden tokens included | no form observed |
+| `contact_email` | an address actually seen on the site | nobody looked |
+| `contact_source` | `mailto` / `obfuscated` / `prose` / `form_page` / `manual` | no address |
+| `contact_source_url` | the page the address was read from | no address |
+| `enriched_at` | when the discovery pass ran | never observed |
+
+Two rules make the block usable:
+
+**Absent is not empty.** A missing `submission_url` means the crawl did not look or
+did not find one *within its page budget*; it does not mean the site has no form. The
+overlay records the page count and the note, so a reader can tell "not looked" from
+"looked and found nothing". `no_channel` in the manifest is the second case only.
+
+**Discovery outranks prose, never the reverse.** A prose note is a dated observation
+by a human; a discovery record is a dated observation of the site. When both exist the
+site wins, because the site is what a submission actually targets. Prose still fills
+gaps: a domain with a prose address and no discovered channel stays actionable.
+

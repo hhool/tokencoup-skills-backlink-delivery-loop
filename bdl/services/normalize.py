@@ -78,6 +78,7 @@ def build_rows(
     now: datetime,
     deferral_days: int = 90,
     templates=None,
+    own_landing_url: str = "",
 ) -> List[ManifestRow]:
     indexed = index_contacts(contacts)
     rows: List[ManifestRow] = []
@@ -125,35 +126,79 @@ def build_rows(
         submission_url: Optional[str] = None
         own_url: Optional[str] = None
         contact_email: Optional[str] = None
+        channel_source = "prose"
+        own_url_source = "prose"
+
+        # An observed channel beats a prose-derived one: discovery read the site
+        # just now, prose read an operator note some time ago. Both are evidence,
+        # but only one of them is current.
+        if prospect.submission_url:
+            submission_url = prospect.submission_url
+            channel_source = "discovery"
+        if prospect.contact_email:
+            contact_email = prospect.contact_email
+            channel_source = "discovery"
 
         if contact:
             if contact.target_url_hint and domain_from_text(contact.target_url_hint) == domain:
                 target_url = contact.target_url_hint
-            if contact.form_url:
+            if not submission_url and contact.form_url:
                 submission_url = absolute_url(contact.form_url, "https://" + domain)
             if contact.own_url_hint:
                 own_url = absolute_url(contact.own_url_hint, own_site_base)
-            contact_email = contact.address
+                own_url_source = "prose"
+            if not contact_email:
+                contact_email = contact.address
+
+        # One configured landing page fills own_url for every row. Without it the
+        # whole pool stalls on a value that is identical for all of them.
+        if not own_url and own_landing_url:
+            own_url = own_landing_url
+            own_url_source = "config"
+
+        if channel_source == "discovery":
+            contact_state = "discovered"
+
+        has_channel = bool(submission_url or contact_email)
 
         if not target_url:
-            gaps.append("target_url: no landing-page evidence in prose; fallback=none (L4 unverifiable)")
-        if not submission_url and not contact_email:
-            gaps.append("submission_url/contact_email: no delivery channel in prose; fallback=none")
+            if prospect.discovered:
+                gaps.append(
+                    "target_url: the listing page does not exist until the site publishes "
+                    "it; submission is unaffected, L4 waits (fallback=unknown, not absent)"
+                )
+            else:
+                gaps.append("target_url: no landing-page evidence in prose; fallback=none (L4 unverifiable)")
+        if not has_channel:
+            if prospect.discovered:
+                gaps.append(
+                    "submission_url/contact_email: discovery observed the site and found "
+                    "neither a form nor an address"
+                )
+            else:
+                gaps.append("submission_url/contact_email: no delivery channel in prose; fallback=none")
         if not own_url:
             gaps.append("own_url: no landing-page hint in prose; fallback=none")
         if prospect.http_status is None:
             gaps.append("http_status: not observed upstream; fallback=unknown")
 
+        # Submitting and observing are different gates. A pool directory has no
+        # listing page until it publishes one, so requiring target_url to submit
+        # would stall every directory row behind an unknowable future value.
         if status not in {"blocked", "deferred"}:
-            if not target_url or (not submission_url and not contact_email):
+            if not has_channel:
+                status = "no_channel" if prospect.discovered else "needs_enrichment"
+            elif not own_url:
                 status = "needs_enrichment"
-            elif contact_state != "candidate":
-                status = "needs_enrichment"
+            elif target_url:
+                status = "ready_for_review"
+            else:
+                status = "ready_to_submit"
 
         channel_type = TYPE_MAP.get(prospect.type_key, "other")
 
         content = None
-        if templates and (submission_url or contact_email) and target_url and own_url:
+        if templates and has_channel and own_url:
             context = {
                 "center_domain": snapshot.center_domain,
                 "own_site_base": own_site_base,
@@ -163,6 +208,7 @@ def build_rows(
                 "target_url": target_url or "",
                 "submission_url": submission_url or "",
                 "contact_email": contact_email or "",
+                "own_url_source": own_url_source,
             }
             try:
                 content = templates.render(channel_type, context)

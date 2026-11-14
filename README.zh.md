@@ -73,11 +73,12 @@ python3 bin/delivery package --out dist
 | 命令 | 用途 |
 |---|---|
 | `doctor` | 校验配置，打印路径与策略状态 |
-| `export-snapshot --store ... --out ...` | 契约 C 生产端：读 prospector store，产出带版本快照 |
+| `export-snapshot --store ... --out ... [--enrichment ...]` | 契约 C 生产端：读 prospector store，并入发现叠加层，产出带版本快照 |
 | `import-prospects --csv ... [--out ...] [--dry-run]` | 读 prospector 的 CSV 导出（信息更全，含 `is_gap`），报告映射并产出快照 |
 | `validate-snapshot --file ...` | 执行快照契约校验 |
 | `build-manifest --snapshot ... [--history ...] [--history-dir ...]` | 产出审阅清单 + 回执；每行内嵌渲染后的文案 |
 | `render-template --channel-type ... --context-json ...` | 预览某行将收到的出站文案 |
+| `draft --manifest ... [--from ...] [--ceiling ...] [--dry-run]` | 把邮件行渲染成可发送的 `.eml`，近似重复的文案直接拒绝 |
 | `lookup --target-domain ... [--history ...] [--history-dir ...]` | 对单个目标域名对账已记录的发送 |
 | `record --target-domain ... --channel form\|email --action ...` | 记录一次投递动作；append-only 且幂等 |
 | `poll-receipts --provider resend\|postmark [--auto-confirm] [--dry-run]` | 拉取未结案发送的回执（L2，每封一次 GET） |
@@ -152,6 +153,32 @@ GET，绝不重发。回执永不置 `live`。
 `--fixture <file>` 用录好的响应集替代真实调用，是在离线环境排练一次轮询的方式
 （见 `assets/provider-events.example.jsonl`）。
 
+### 发现：候选池为什么从空变成可用
+
+池子里只有域名，没有渠道：`submission_url` 与 `contact_email` 每个候选都是空的，而这个包里没有任何东西能凭空造出来。它们由 prospector 仓库的 `tools/discover_entry.py` 只读观测（遵守 robots、带缓存），在导出时按契约 C 1.1.0 并入：
+
+```bash
+python3 ../backlink-prospector/tools/discover_entry.py \
+    --store ../backlink-prospector/data/store-soundbuttons.cc.json \
+    --out ../backlink-prospector/data/enrichment-soundbuttons.cc.json --resume
+
+python3 bin/delivery export-snapshot --store ...store-soundbuttons.cc.json \
+    --enrichment ...enrichment-soundbuttons.cc.json --out data/snapshots/snapshot.json
+```
+
+两个后果值得知道：
+
+- 行可以在没有落地页的情况下成为 `ready_to_submit`。`target_url` 是链接**应该出现**的那一页，而目录站要等收录后才产生 listing 页。提交前就要求它，等于把每一行目录站卡在一个不可能提前知道的值上；提交与观测本来就是两道闸。
+- `no_channel` 是**已完成**的行，不是待办：发现流程看过该站，既无表单也无邮箱。`needs_enrichment` 仍表示没人看过。
+
+`BDL_OWN_LANDING_URL` 为所有行填 `own_url`，因为这个值对整池是同一个——没有它，每行都卡在一个其实并不属于单行的事实上。
+
+### 起草（L1 准备，不是传输）
+
+`draft` 为每个有邮箱的行写一个 `.eml`：主题与正文来自渠道模板，`X-BDL-*` 头记录来源，`Message-ID` 确定性生成。发送仍然是人工动作。
+
+真正有意思的是 footprint 闸门。一百个目录站收到同一段话，就是同一段话发了一百次，所以每个渠道带多份正文，draft 挑第一份「与本批次已产出文案的 5 词 shingle 相似度低于 `--ceiling`（默认 0.80）」的。比较前先掩掉域名与 URL：同一模板只换域名，原始相似度约 0.76，会从朴素的 0.80 阈值下溜过去，而对去重器来说就是同一段话。近似重复会被跳过并报出最接近的域名与分数，绝不合并。
+
 ### 表单指纹注册表
 
 表单由 `sha256(方法 + action 路径 + 排序后的字段名)` 识别，不看域名：同一站的
@@ -222,7 +249,7 @@ bdl/package.py               分发 zip
 
 ## 8. 契约与规则
 
-- `contracts/prospect-snapshot.schema.json` —— 上游快照，版本 `1.0.0`
+- `contracts/prospect-snapshot.schema.json` —— 上游快照，版本 `1.1.0`（`1.0.0` 仍可读；旧版本标签下出现发现字段会被拒绝）
 - `references/upstream-contract.md` —— 字段映射，以及 `url` 为何不是 `target_url`
 - `references/state-and-evidence.md` —— L1–L4、台账字段、观察窗
 - `references/rule-boundary.md` —— R-520 / R-530 裁决与改规则成本
@@ -237,7 +264,7 @@ PYTHONPATH=$PWD python3 -m unittest discover -s tests -t . -v
 python3 -m compileall -q bdl bin tests
 ```
 
-共 172 项离线单测与 CLI 测试，覆盖 schema 拒绝、CSV 导入映射、散文溯源、字段映射、节奏、观察窗、模板、历史对账、扫描/自动确认台账、事件幂等、状态投影与两个计时器、表单指纹、发信商状态映射、回执轮询及其幂等、发送闸门、打包与 CLI 输出。测试不联网，也不 mock 服务层。
+共 211 项离线单测与 CLI 测试，覆盖 schema 拒绝、CSV 导入映射、散文溯源、字段映射、节奏、观察窗、模板、历史对账、扫描/自动确认台账、事件幂等、状态投影与两个计时器、表单指纹、发信商状态映射、回执轮询及其幂等、发送闸门、打包与 CLI 输出。测试不联网，也不 mock 服务层。
 
 ## 10. 分发
 

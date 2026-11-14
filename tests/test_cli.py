@@ -117,6 +117,42 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("{{", payload["content"]["email"]["subject"])
         self.assertIn("x.com", payload["content"]["email"]["subject"])
 
+    def test_draft_writes_a_file_and_never_sends(self):
+        row = {
+            "prospect_id": "x.com#asset", "center_domain": "soundbuttons.cc",
+            "target_domain": "x.com", "candidate_url": "https://x.com",
+            "target_url": None, "submission_url": None,
+            "own_url": "https://soundbuttons.cc/free-soundboard",
+            "contact_email": "hi@x.com", "contact_state": "discovered",
+            "channel_type": "asset", "type_key": "resource", "status": "ready_to_submit",
+            "reasons": [], "gaps": [], "idempotency_key": "k1",
+            "content": None, "channels": ["email"],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "delivery-manifest.json"
+            manifest.write_text(json.dumps({
+                "center_domain": "soundbuttons.cc", "rows": [row],
+            }), encoding="utf-8")
+            env = dict(self._workspace(tmp))
+            env["BDL_FROM_EMAIL"] = "outreach@soundbuttons.cc"
+            code, payload, _ = self._run(
+                ["draft", "--manifest", str(manifest), "--out", str(Path(tmp) / "drafts")], env
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["counts"]["drafted"], 1)
+            written = list((Path(tmp) / "drafts").glob("*.eml"))
+            self.assertEqual(len(written), 1)
+            self.assertIn("X-BDL-Target-Domain: x.com", written[0].read_text(encoding="utf-8"))
+
+    def test_draft_without_a_from_address_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "m.json"
+            manifest.write_text(json.dumps({"center_domain": "c.com", "rows": []}), encoding="utf-8")
+            env = dict(self._workspace(tmp))
+            env.pop("BDL_FROM_EMAIL", None)
+            code, payload, _ = self._run(["draft", "--manifest", str(manifest)], env)
+            self.assertNotEqual(code, 0)
+
     def _workspace(self, tmp: str) -> dict:
         return {
             "BDL_HOME": tmp,

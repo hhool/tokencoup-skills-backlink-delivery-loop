@@ -12,18 +12,21 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List
 
-from .. import CONTRACTS_VERSION
+from .. import CONTRACTS_VERSION, DISCOVERY_FIELDS, SUPPORTED_CONTRACT_VERSIONS
 from ..errors import SnapshotError
 from ..models import Prospect, Snapshot
 
-SUPPORTED_VERSIONS = {CONTRACTS_VERSION}
+SUPPORTED_VERSIONS = set(SUPPORTED_CONTRACT_VERSIONS)
+DISCOVERY_VERSION = "1.1.0"
 _TOP_KEYS = {"center_domain", "schema_version", "generated_at", "source", "prospects"}
 _SOURCE_KEYS = {"repo", "file", "content_hash"}
 _PROSPECT_KEYS = {
     "domain", "url", "type_key", "priority", "http_status", "acquired",
     "is_competitor", "is_gap", "note", "note_en", "first_seen", "last_seen",
-}
+} | set(DISCOVERY_FIELDS)
+_CONTACT_SOURCES = {"mailto", "prose", "form_page", "obfuscated", "manual"}
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SHAPE_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _reject_unknown(where: str, actual: set, allowed: set) -> None:
@@ -38,7 +41,54 @@ def _require_mapping(value: Any, where: str) -> Dict[str, Any]:
     return value
 
 
-def _parse_prospect(raw: Any, index: int) -> Prospect:
+def _parse_discovery(item: Dict[str, Any], where: str, version: str) -> Dict[str, Any]:
+    """Validate the 1.1.0 discovery block. Empty and absent are different facts."""
+    present = [key for key in DISCOVERY_FIELDS if key in item]
+    if not present:
+        return {}
+    if version != DISCOVERY_VERSION:
+        raise SnapshotError(
+            "Discovery fields require schema_version %s" % DISCOVERY_VERSION,
+            where=where,
+            version=version,
+            expected=DISCOVERY_VERSION,
+            fields=sorted(present),
+        )
+    for key in ("submission_url", "contact_email", "contact_source", "contact_source_url", "enriched_at"):
+        value = item.get(key)
+        if value is not None and not isinstance(value, str):
+            raise SnapshotError("Field must be a string or null", where=where, field=key)
+    shape = item.get("form_shape")
+    if shape is not None and not _SHAPE_RE.match(str(shape)):
+        raise SnapshotError("form_shape must be sha256:<64 hex>", where=where, field="form_shape")
+    fields = item.get("form_fields")
+    if fields is not None:
+        if not isinstance(fields, list) or not all(isinstance(name, str) for name in fields):
+            raise SnapshotError("form_fields must be an array of strings", where=where)
+    source = item.get("contact_source")
+    if source is not None and source not in _CONTACT_SOURCES:
+        raise SnapshotError(
+            "contact_source must be one of the known provenance values",
+            where=where,
+            value=source,
+        )
+    if source and not item.get("contact_email"):
+        raise SnapshotError(
+            "contact_source without contact_email is not a provenance record",
+            where=where,
+        )
+    return {
+        "submission_url": (item.get("submission_url") or None),
+        "form_shape": (shape or None),
+        "form_fields": (list(fields) if fields else None),
+        "contact_email": (item.get("contact_email") or None),
+        "contact_source": (source or None),
+        "contact_source_url": (item.get("contact_source_url") or None),
+        "enriched_at": (item.get("enriched_at") or None),
+    }
+
+
+def _parse_prospect(raw: Any, index: int, version: str = CONTRACTS_VERSION) -> Prospect:
     where = "prospects[%d]" % index
     item = _require_mapping(raw, where)
     _reject_unknown(where, set(item), _PROSPECT_KEYS)
@@ -66,6 +116,7 @@ def _parse_prospect(raw: Any, index: int) -> Prospect:
         note_en=item.get("note_en", "") or "",
         first_seen=item.get("first_seen"),
         last_seen=item.get("last_seen"),
+        **_parse_discovery(item, where, version),
     )
 
 
@@ -116,7 +167,7 @@ def load_snapshot(path: str | Path, expected_center_domain: str = "") -> Snapsho
     prospects: List[Prospect] = []
     seen = set()
     for index, raw_item in enumerate(root["prospects"]):
-        prospect = _parse_prospect(raw_item, index)
+        prospect = _parse_prospect(raw_item, index, version)
         if prospect.key in seen:
             raise SnapshotError("Duplicate prospect domain", where="prospects[%d]" % index, domain=prospect.key)
         seen.add(prospect.key)

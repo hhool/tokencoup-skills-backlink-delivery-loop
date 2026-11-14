@@ -52,6 +52,9 @@ class Config:
     provider: str = ""
     provider_base_url: str = ""
     provider_key_present: bool = False
+    own_landing_url: str = ""
+    from_email: str = ""
+    from_name: str = ""
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "Config":
@@ -105,6 +108,17 @@ class Config:
 
         provider = source.get("BDL_PROVIDER", "").strip().lower()
         provider_base = source.get("BDL_PROVIDER_BASE_URL", "").strip().rstrip("/")
+        # One page the whole pool should link to. Without it every row stalls on a
+        # value that is identical across the pool.
+        from_email = source.get("BDL_FROM_EMAIL", "").strip()
+        from_name = source.get("BDL_FROM_NAME", "").strip()
+        own_landing = source.get("BDL_OWN_LANDING_URL", "").strip()
+        if not own_landing and base:
+            own_landing = base
+        if own_landing and not own_landing.startswith(("http://", "https://")):
+            raise ConfigError(
+                "Own landing URL must be absolute", env="BDL_OWN_LANDING_URL", value=own_landing
+            )
         # The key itself never enters the config object: a frozen dataclass ends up
         # in logs and JSON dumps, and a receipt poll only needs to know it exists.
         key_present = bool(source.get("BDL_PROVIDER_API_KEY", "").strip())
@@ -132,4 +146,7 @@ class Config:
             provider=provider,
             provider_base_url=provider_base,
             provider_key_present=key_present,
+            own_landing_url=own_landing,
+            from_email=from_email,
+            from_name=from_name,
         )
