@@ -24,6 +24,7 @@ This module renders copy. It never sends anything.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import re
 from dataclasses import dataclass, field
@@ -204,6 +205,65 @@ BODY_VARIANTS: Dict[str, List[str]] = {
 }
 
 
+# Blocks that compose into a body. A channel with 7 rows in one batch needs 7
+# bodies, and hand-writing 7 near-identical paragraphs is how a footprint gets
+# built. Four block groups give 3x3x3x2 = 54 coherent bodies from 11 short strings,
+# each combination written to stand on its own.
+BODY_BLOCKS: Dict[str, Dict[str, List[str]]] = {
+    "asset": {
+        "greeting": [
+            "Hello,",
+            "Hi {{ target_domain }} team,",
+            "Hello there,",
+        ],
+        "pitch": [
+            "I maintain {{ center_domain }} and recently published {{ own_url }}, which "
+            "covers the same ground as the resource pages on your site.",
+            "We run {{ center_domain }}. This page overlaps with what you already "
+            "collect: {{ own_url }}",
+            "{{ own_url }} is a guide from {{ center_domain }} that would sit "
+            "comfortably beside the links you already list.",
+        ],
+        "ask": [
+            "If it is useful, a mention would be appreciated.",
+            "If it fits an existing list, feel free to add it.",
+            "No form to fill and no fee expected - leave it out if it does not fit.",
+        ],
+        "closing": [
+            "Thanks for maintaining the collection.\n\n{{ center_domain }}",
+            "Thank you for your time.\n\n{{ center_domain }}",
+        ],
+    },
+}
+
+_BLOCK_ORDER = ("greeting", "pitch", "ask", "closing")
+MAX_VARIANTS = 24
+
+
+def compose_bodies(blocks: Dict[str, List[str]]) -> List[str]:
+    """Cartesian product of the block groups, in a stable order."""
+    # Enumerate with the longest block varying fastest, so two successive bodies
+    # differ by a whole sentence rather than by the closing line alone. Assembly
+    # still follows _BLOCK_ORDER.
+    enumeration = [key for key in _BLOCK_ORDER if key != "pitch"] + ["pitch"]
+    groups: List[List[str]] = []
+    for key in enumeration:
+        values = blocks.get(key) or []
+        if isinstance(values, str):
+            values = [values]
+        cleaned = [str(item) for item in values if str(item).strip()]
+        if not cleaned:
+            return []
+        groups.append(cleaned)
+    bodies: List[str] = []
+    for combination in itertools.product(*groups):
+        parts = dict(zip(enumeration, combination))
+        bodies.append("\n\n".join(parts[key] for key in _BLOCK_ORDER))
+        if len(bodies) >= MAX_VARIANTS:
+            break
+    return bodies
+
+
 def _render_text(template: str, context: Dict[str, str]) -> str:
     def repl(match: "re.Match[str]") -> str:
         value = context.get(match.group(1))
@@ -269,13 +329,26 @@ class TemplateSet:
         return base
 
     def body_variants(self, channel_type: str) -> List[str]:
-        """Every body this channel can produce, primary first."""
+        """Every body this channel can produce, primary first.
+
+        A channel may define ``body_blocks`` (composable groups, many combinations)
+        or ``body_variants`` (a few hand-written alternatives). Blocks win: they are
+        the only form that scales with batch size without writing more prose.
+        """
         channel = self.templates.get(channel_type) or self.templates.get("other", {})
         email = channel.get("email", {})
+        # An explicit (even empty) body_blocks key wins over the built-in blocks, so
+        # a channel can be pinned to a single hand-written body.
+        blocks = email["body_blocks"] if "body_blocks" in email else BODY_BLOCKS.get(channel_type) or {}
+        composed = compose_bodies(blocks) if blocks else []
         primary = str(email.get("body", ""))
         extra = [str(item) for item in (email.get("body_variants") or []) if str(item).strip()]
         ordered = [primary] + [item for item in extra if item.strip() and item != primary]
-        return [item for item in ordered if item.strip()] or [primary]
+        ordered = [item for item in ordered if item.strip()]
+        if composed:
+            merged = composed + [item for item in ordered if item not in composed]
+            return merged[:MAX_VARIANTS]
+        return ordered or [primary]
 
     def render(
         self, channel_type: str, context: Dict[str, str], variant: Optional[int] = None

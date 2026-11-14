@@ -75,7 +75,7 @@ class VariantTests(unittest.TestCase):
             "contact_email": "hi@example.com",
         }
         variants = templates.render_variants("asset", context)
-        self.assertEqual(len(variants), 2)
+        self.assertGreaterEqual(len(variants), 2)
         self.assertNotEqual(variants[0]["email"]["body"], variants[1]["email"]["body"])
 
     def test_default_render_is_the_primary_body(self):
@@ -87,7 +87,32 @@ class VariantTests(unittest.TestCase):
             "submission_url": "", "contact_email": "hi@example.com",
         }
         self.assertEqual(templates.render("asset", context)["variant"], 0)
-        self.assertEqual(len(templates.body_variants("asset")), 2)
+
+    def test_blocks_scale_with_the_batch(self):
+        # Seven asset rows in one batch would be seven identical pitches if a
+        # channel only offered two bodies. Composition is what makes room.
+        templates = TemplateSet.builtin()
+        bodies = templates.body_variants("asset")
+        self.assertGreaterEqual(len(bodies), 7)
+        self.assertLessEqual(len(bodies), 24)
+        self.assertEqual(len(set(bodies)), len(bodies))
+
+    def test_seven_asset_rows_all_draft(self):
+        rows = [make_row("site%d.com" % index) for index in range(7)]
+        with tempfile.TemporaryDirectory() as tmp:
+            report = draft_batch(
+                rows,
+                templates=TemplateSet.builtin(),
+                center_domain=CENTER,
+                own_site_base="https://soundbuttons.cc",
+                from_addr="outreach@soundbuttons.cc",
+                out_dir=tmp,
+                now=NOW,
+            )
+            self.assertEqual(report["counts"]["drafted"], 7)
+            self.assertEqual(report["counts"]["duplicates_blocked"], 0)
+            bodies = {item["body"] for item in report["drafted"]}
+            self.assertEqual(len(bodies), 7)
 
 
 class DraftBatchTests(unittest.TestCase):
@@ -119,6 +144,7 @@ class DraftBatchTests(unittest.TestCase):
         # One body only: the second domain cannot differ, so it is skipped. This is
         # the case that would otherwise ship forty identical pitches.
         templates = TemplateSet.builtin()
+        templates.templates["asset"]["email"]["body_blocks"] = {}  # pin one body
         templates.templates["asset"]["email"]["body_variants"] = [
             templates.templates["asset"]["email"]["body"]
         ]
@@ -138,8 +164,10 @@ class DraftBatchTests(unittest.TestCase):
         templates = TemplateSet.builtin()
         context_a = self._context("alpha.com")
         context_b = self._context("beta.com")
-        body_a = templates.render("asset", context_a)["email"]["body"]
-        body_b = templates.render("asset", context_b)["email"]["body"]
+        # `other` is the channel whose primary body names the target domain, which
+        # is the case raw similarity is blind to.
+        body_a = templates.render("other", context_a)["email"]["body"]
+        body_b = templates.render("other", context_b)["email"]["body"]
         raw = similarity(body_a, body_b)
         self.assertLess(raw, 0.80)  # what the naive comparison would have allowed
         score = footprint_score(
@@ -188,6 +216,7 @@ class DraftBatchTests(unittest.TestCase):
     def test_cjk_copy_is_never_drafted(self):
         templates = TemplateSet.builtin()
         cjk = "\u4f60\u597d\uff0c\u8fd9\u662f {{ target_domain }} \u7684\u5185\u5bb9\u3002"
+        templates.templates["asset"]["email"]["body_blocks"] = {}
         templates.templates["asset"]["email"]["body"] = cjk
         templates.templates["asset"]["email"]["body_variants"] = [cjk]
         report = self._draft([make_row("alpha.com")], templates=templates, write=False)

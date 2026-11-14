@@ -192,6 +192,8 @@ python3 bin/delivery export-snapshot --store ...store-soundbuttons.cc.json \
 `templates.json` 覆盖所有中心，`<center_domain>.json` 只覆盖一个。见
 `assets/templates.example.json`。渲染拒绝未定义的占位符与邮件文案中的汉字（R-522）。
 
+渠道可以写 `body_variants`（几份手写变体）或 `body_blocks`（问候 / 立论 / 请求 / 结尾 四组积木，组合出至多 24 份正文）。积木是能随批次放大的形式：同一渠道类型有七行就需要七份正文，而手写七段近似的话正是 footprint 的来源。没有积木时，第七行会被当作重复拒绝，而不是作为副本发出去。写 `"body_blocks": {}` 可把渠道钉死为单份正文。
+
 ### 自动确认
 
 `scan --auto-confirm`（或 `BDL_AUTO_CONFIRM=true`）把命中的链接在本地台账标 `live`，
@@ -264,7 +266,7 @@ PYTHONPATH=$PWD python3 -m unittest discover -s tests -t . -v
 python3 -m compileall -q bdl bin tests
 ```
 
-共 211 项离线单测与 CLI 测试，覆盖 schema 拒绝、CSV 导入映射、散文溯源、字段映射、节奏、观察窗、模板、历史对账、扫描/自动确认台账、事件幂等、状态投影与两个计时器、表单指纹、发信商状态映射、回执轮询及其幂等、发送闸门、打包与 CLI 输出。测试不联网，也不 mock 服务层。
+共 213 项离线单测与 CLI 测试，覆盖 schema 拒绝、CSV 导入映射、散文溯源、字段映射、节奏、观察窗、模板、历史对账、扫描/自动确认台账、事件幂等、状态投影与两个计时器、表单指纹、发信商状态映射、回执轮询及其幂等、发送闸门、打包与 CLI 输出。测试不联网，也不 mock 服务层。
 
 ## 10. 分发
 

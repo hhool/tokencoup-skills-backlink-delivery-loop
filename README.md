@@ -225,6 +225,13 @@ via `BDL_TEMPLATES_DIR`: `templates.json` overrides all centres, `<center_domain
 overrides one. See `assets/templates.example.json`. Rendering rejects undefined
 placeholders and CJK in email copy (R-522).
 
+A channel may define `body_variants` (a few hand-written alternatives) or
+`body_blocks` (greeting / pitch / ask / closing groups, composed into up to 24
+bodies). Blocks are the form that scales: seven rows of one channel type need seven
+bodies, and hand-writing seven near-identical paragraphs is how a footprint gets
+built. Without them, the seventh row is refused as a duplicate rather than sent as
+a copy. Setting `"body_blocks": {}` pins a channel to a single body.
+
 ### Auto-confirm
 
 `scan --auto-confirm` (or `BDL_AUTO_CONFIRM=true`) marks a `found` link `live` in the
@@ -302,7 +309,7 @@ PYTHONPATH=$PWD python3 -m unittest discover -s tests -t . -v
 python3 -m compileall -q bdl bin tests
 ```
 
-211 offline unit and CLI tests cover schema rejection, CSV import mapping, prose
+213 offline unit and CLI tests cover schema rejection, CSV import mapping, prose
 provenance, field mapping, cadence, the observation window, templates, history
 reconciliation, the scan/auto-confirm ledger, event idempotency, the state
 projection and its two timers, form fingerprints, provider status mapping, receipt
