@@ -46,6 +46,12 @@ page and produces systematic false negatives.
 6. `plan-window --submitted-at <iso>` - compute the T+1/3/7/14/30 day fetch schedule.
 7. `classify --outcome ... --http-status ...` - record an observation. A 403, timeout
    or robots refusal is `unknown`, never `absent`.
+8. `observe --target-url <page> --own-url <our-url>` - the local L4 detector. A single
+   read-only GET; finds an anchor to the own host (`found`), reports `absent` only on a
+   2xx page with no such anchor, and reports `unknown` on any fetch failure (403,
+   timeout, robots). Use `--record <file>` to append the observation as JSONL. This is
+   detection only: marking a link `live` in link-ledger is a separate, human-confirmed
+   step that lives on the SEXTANT side.
 
 ## Statuses
 

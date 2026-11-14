@@ -58,6 +58,14 @@ def _parser() -> argparse.ArgumentParser:
     export.add_argument("--out", required=True, help="Write the snapshot document to this path")
     export.add_argument("--repo", default="tokencoup-skills-backlink-prospector",
                         help="Source repo label recorded in snapshot.source.repo")
+
+    observe = sub.add_parser(
+        "observe",
+        help="Fetch a target page and check for a live backlink (L4, read-only GET)",
+    )
+    observe.add_argument("--target-url", required=True, help="Third-party page to inspect")
+    observe.add_argument("--own-url", required=True, help="Our URL expected to appear as a backlink")
+    observe.add_argument("--record", default="", help="Append the observation as JSONL to this path")
     return parser
 
 
@@ -153,6 +161,17 @@ def _run(args: argparse.Namespace) -> dict:
             "prospects": len(snapshot["prospects"]),
             "content_hash": snapshot["source"]["content_hash"],
         }
+
+    if args.command == "observe":
+        from .services.observe import default_fetcher, observe_target
+
+        record = observe_target(default_fetcher(), args.target_url, args.own_url)
+        if args.record:
+            path = Path(args.record)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return {"ok": True, "observation": record}
 
     raise DeliveryError("Unknown command", command=getattr(args, "command", ""))
 

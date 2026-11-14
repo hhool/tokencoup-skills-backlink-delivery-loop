@@ -27,11 +27,13 @@ agent_created: true
 ## 工作流
 
 1. `doctor` —— 校验配置，确认发送闸门关闭。
-2. `validate-snapshot --file <export>` —— 校验 schema 版本、哈希与中心域名。
-3. `build-manifest --snapshot <export> --history <send-history.json>` —— 读取快照、join 散文联系地址、应用准入与节奏规则，写出 `delivery-manifest.json` 与 append-only 的 `receipts.jsonl`。
-4. 人工逐条审阅 `ready_for_review` 行；任何工具都不得自动执行。
-5. `plan-window --submitted-at <iso>` —— 计算 T+1/3/7/14/30 天抓取排期。
-6. `classify --outcome ... --http-status ...` —— 记录一次观测。403、超时、robots 拒绝记 `unknown`，绝不记 `absent`。
+2. `export-snapshot --store <prospector store-<domain>.json> --out <snapshot.json>` —— 契约 C 的生产端。读取 backlink-prospector 的 store 并产出带版本的快照。消费端从不触碰 prospector 内部结构；本命令是唯一的桥。
+3. `validate-snapshot --file <export>` —— 校验 schema 版本、哈希与中心域名。
+4. `build-manifest --snapshot <export> --history <send-history.json>` —— 读取快照、join 散文联系地址、应用准入与节奏规则，写出 `delivery-manifest.json` 与 append-only 的 `receipts.jsonl`。
+5. 人工逐条审阅 `ready_for_review` 行；任何工具都不得自动执行。
+6. `plan-window --submitted-at <iso>` —— 计算 T+1/3/7/14/30 天抓取排期。
+7. `classify --outcome ... --http-status ...` —— 记录一次观测。403、超时、robots 拒绝记 `unknown`，绝不记 `absent`。
+8. `observe --target-url <page> --own-url <our-url>` —— 本地 L4 检测器。仅一次只读 GET：找到指向自身主机的锚点记 `found`；2xx 页面但无该锚点记 `absent`；任何抓取失败（403、超时、robots）记 `unknown`。可用 `--record <file>` 把观测追加为 JSONL。本命令只做检测：把链接标记为 `live` 写回 link-ledger 是独立的、需人工确认的步骤，落在 SEXTANT 侧。
 
 ## 状态
 
