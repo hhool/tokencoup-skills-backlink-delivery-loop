@@ -13,7 +13,7 @@ from typing import List, Optional
 from . import __version__
 from .adapters.events import ACTIONS
 from .config import Config
-from .errors import DeliveryError
+from .errors import ConfigError, DeliveryError
 from .log import JsonLogger, new_batch_id
 from .services import window
 from .services.pipeline import build_manifest
@@ -148,6 +148,20 @@ def _parser() -> argparse.ArgumentParser:
     draft.add_argument("--domain", default="", help="Draft only this target domain")
     draft.add_argument("--dry-run", action="store_true", help="Render and check, write nothing")
 
+    replies = sub.add_parser(
+        "replies",
+        help="Read exported replies, match them to targets, and queue classification proposals",
+    )
+    replies.add_argument("--source", required=True,
+                         help="An .eml file, an .mbox archive, or a directory of .eml exports")
+    replies.add_argument("--manifest", default="", help="Manifest for Message-ID based matching")
+    replies.add_argument("--records-dir", default="")
+    replies.add_argument("--out", default="", help="Directory for the proposal queue")
+    replies.add_argument("--auto-confirm", action="store_true",
+                         help="Write yes/no at high confidence straight into the event log")
+    replies.add_argument("--dry-run", action="store_true", help="Classify and report, write nothing")
+    replies.add_argument("--actor", default="reply-parser")
+
     st = sub.add_parser("status", help="Current state per domain and channel, folded from the event log")
     st.add_argument("--records-dir", default="")
     st.add_argument("--observations-dir", default="")
@@ -180,6 +194,35 @@ def _parser() -> argparse.ArgumentParser:
     forms_check.add_argument("--action", required=True)
     forms_check.add_argument("--fields", required=True)
     forms_check.add_argument("--forms-dir", default="")
+    forms_prefill = forms_sub.add_parser(
+        "prefill",
+        help="Compose per-form value packs for the browser userscript",
+    )
+    forms_prefill.add_argument("--manifest", required=True, help="delivery-manifest.json")
+    forms_prefill.add_argument("--snapshot", default="",
+                               help="Contract-C snapshot, for form_shape and form_fields")
+    forms_prefill.add_argument("--out", default="", help="Directory for the pack")
+    forms_prefill.add_argument("--from", dest="from_addr", default="", help="From address (or BDL_FROM_EMAIL)")
+    forms_prefill.add_argument("--from-name", default="")
+    forms_prefill.add_argument("--own-url", default="", help="Landing URL (or BDL_OWN_LANDING_URL)")
+    forms_prefill.add_argument("--ceiling", type=float, default=0.80,
+                               help="Refuse a pack this similar to one already composed (0-1)")
+    forms_prefill.add_argument("--domain", default="", help="Pack only this target domain")
+    forms_prefill.add_argument("--dry-run", action="store_true", help="Compose and report, write nothing")
+    forms_adopt = forms_sub.add_parser(
+        "adopt",
+        help="Register a form from the receipt the userscript saved after a human submitted",
+    )
+    forms_adopt.add_argument("--file", required=True, help="Receipt JSON written by the userscript")
+    forms_adopt.add_argument("--reviewed-by", required=True)
+    forms_adopt.add_argument("--forms-dir", default="")
+    forms_adopt.add_argument("--dry-run", action="store_true", help="Validate and report, write nothing")
+    forms_lookup = forms_sub.add_parser("lookup", help="Resolve a form to an exact or reused field map")
+    forms_lookup.add_argument("--method", default="POST")
+    forms_lookup.add_argument("--action", required=True)
+    forms_lookup.add_argument("--fields", required=True)
+    forms_lookup.add_argument("--shape", default="")
+    forms_lookup.add_argument("--forms-dir", default="")
     return parser
 
 
@@ -565,6 +608,81 @@ def _run(args: argparse.Namespace) -> dict:
         )
         return {"ok": True, "dry_run": bool(args.dry_run), "from": from_addr, **report}
 
+    if args.command == "replies":
+        from .adapters.events import load_events
+        from .adapters.mailbox import read_messages
+        from .services.record import build_event
+        from .services.replies import propose, PROPOSAL_KIND
+
+        messages = read_messages(args.source)
+        if not messages:
+            raise ConfigError("No replies found to read", path=str(args.source),
+                              hint="an .eml file, an .mbox archive, or a directory of .eml exports")
+
+        records_dir = Path(args.records_dir or str(cfg.records_dir))
+        events = load_events([records_dir])
+        known = [str(event.get("target_domain") or "") for event in events]
+        rows = []
+        if args.manifest:
+            from dataclasses import fields as dataclass_fields
+
+            from .models import ManifestRow
+            source = Path(args.manifest)
+            if not source.is_file():
+                raise ConfigError("Manifest not found", path=str(source))
+            manifest = json.loads(source.read_text(encoding="utf-8"))
+            fields_ = {item.name for item in dataclass_fields(ManifestRow)}
+            rows = [
+                ManifestRow(**{key: value for key, value in item.items() if key in fields_})
+                for item in manifest.get("rows", [])
+                if isinstance(item, dict)
+            ]
+            known.extend(str(row.target_domain) for row in rows)
+        known = [item for item in dict.fromkeys(item for item in known if item)]
+
+        proposal_path = ""
+        if not args.dry_run and not args.auto_confirm:
+            out_dir = Path(args.out or str(cfg.out_dir))
+            proposal_path = out_dir / "reply-proposals.jsonl"
+
+        report = propose(
+            messages,
+            known_domains=known,
+            rows=rows,
+            auto_confirm=args.auto_confirm,
+            proposal_path=proposal_path,
+        )
+
+        written: List[str] = []
+        if args.auto_confirm and not args.dry_run:
+            for item in report["proposals"]:
+                if item.get("reply_class") not in ("yes", "no") or item.get("confidence") != "high":
+                    continue
+                event = build_event(
+                    center_domain=cfg.center_domain,
+                    target_domain=str(item["target_domain"]),
+                    channel="email",
+                    action="reply",
+                    address=str(item.get("address") or ""),
+                    reply_class=item["reply_class"],
+                    note="classified by reply-parser: %s" % ", ".join(item.get("signals") or []),
+                    actor=args.actor,
+                )
+                path = records_dir / ("events-%s.jsonl" % (event["center_domain"] or "unknown"))
+                from .adapters.events import append_event
+
+                _, appended = append_event(path, event)
+                if appended:
+                    written.append(str(path))
+            report["events_written"] = written
+        logger.emit(
+            "replies_classified",
+            messages=report["messages"],
+            matched=report["matched"],
+            unmatched=len(report["unmatched"]),
+        )
+        return {"ok": True, "dry_run": bool(args.dry_run), **report}
+
     if args.command == "status":
         from .adapters.events import load_events, normalise_legacy
         from .adapters.observation import load_observations_dir
@@ -648,6 +766,92 @@ def _run(args: argparse.Namespace) -> dict:
                 "forms_dir": str(directory),
                 "entry": entry,
                 "note": "Registered. Next encounter prefills; a human still clicks submit.",
+            }
+        if args.forms_command == "lookup":
+            names = [name.strip() for name in args.fields.split(",") if name.strip()]
+            found = registry.lookup(
+                directory, args.method, args.action, names, args.shape
+            )
+            return {
+                "ok": True,
+                "forms_dir": str(directory),
+                **found,
+                "note": (
+                    "`exact` = this form was reviewed; `shape` = the same plugin on "
+                    "another site, so the same wire field carries the same slot; "
+                    "`none` = a human maps it once and `forms adopt` stores it."
+                ),
+            }
+        if args.forms_command == "prefill":
+            from dataclasses import fields as dataclass_fields
+
+            from .models import ManifestRow
+            from .services.prefill import build_packs
+
+            source = Path(args.manifest)
+            if not source.is_file():
+                raise ConfigError("Manifest not found", path=str(source))
+            manifest = json.loads(source.read_text(encoding="utf-8"))
+            known = {item.name for item in dataclass_fields(ManifestRow)}
+            rows = [
+                ManifestRow(**{key: value for key, value in item.items() if key in known})
+                for item in manifest.get("rows", [])
+                if isinstance(item, dict)
+            ]
+            if args.domain:
+                rows = [row for row in rows if row.target_domain == args.domain]
+
+            prospects = []
+            if args.snapshot:
+                from .adapters.snapshot import load_snapshot
+                snapshot = load_snapshot(args.snapshot, manifest.get("center_domain") or cfg.center_domain)
+                prospects = snapshot.prospects
+
+            from_addr = args.from_addr or cfg.from_email
+            if not from_addr:
+                raise ConfigError(
+                    "A From address is required to fill a submission form",
+                    env="BDL_FROM_EMAIL",
+                    hint="The address the site would answer",
+                )
+            center = manifest.get("center_domain") or cfg.center_domain
+            report = build_packs(
+                rows,
+                templates=TemplateSet.load(cfg.templates_dir, center),
+                center_domain=center,
+                own_landing_url=args.own_url or cfg.own_landing_url,
+                from_email=from_addr,
+                from_name=args.from_name or cfg.from_name,
+                forms_dir=directory,
+                prospects=prospects,
+                ceiling=args.ceiling,
+                out_dir=args.out or str(cfg.out_dir / "prefill"),
+                write=not args.dry_run,
+            )
+            logger.emit("prefill_packs_built", packed=report["counts"]["packed"])
+            return {"ok": True, "dry_run": bool(args.dry_run), "from": from_addr, **report}
+        if args.forms_command == "adopt":
+            from .services.prefill import load_receipt, record_command
+
+            receipt = load_receipt(args.file)
+            if args.dry_run:
+                return {
+                    "ok": True,
+                    "dry_run": True,
+                    "target_domain": receipt.get("target_domain"),
+                    "fields": receipt.get("field_names"),
+                    "slot_map": receipt.get("slot_map"),
+                    "evidence": receipt.get("response_url"),
+                    "would_register": True,
+                }
+            entry = registry.adopt_receipt(directory, receipt, args.reviewed_by)
+            center = receipt.get("center_domain") or cfg.center_domain
+            return {
+                "ok": True,
+                "forms_dir": str(directory),
+                "entry": entry,
+                "next_command": record_command(receipt, center, args.reviewed_by),
+                "note": "The map is stored. Run next_command to record the submission event.",
             }
         names = [name.strip() for name in args.fields.split(",") if name.strip()]
         return {"ok": True, **registry.check(directory, args.method, args.action, names)}

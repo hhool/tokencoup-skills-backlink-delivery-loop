@@ -73,11 +73,13 @@ agent_created: true
 9. `record --target-domain <d> --channel <form|email> --action <...>` —— 记录人工**实际执行**的动作。append-only 且幂等：重复的事件 id 会被拒绝而不是重复写入。`sent` 必须带 `--provider-id`；`submitted` 必须带 `--evidence`；`reply` 必须带 `--reply-class yes|no|pay|reciprocal`。`pay` 与 `reciprocal` 会被记录并标记 `compliance: refused`（R-510）——域名就此关闭，不进入议价。
 10. `poll-receipts --provider <resend|postmark> [--auto-confirm] [--dry-run]` —— 向发信商查每个未结案发送的结局。每封信一次 GET，只查「在 `BDL_RECEIPT_WINDOW_DAYS` 内、带 provider id、且尚无定论回执」的发送。`delivered` 与 `bounced` 落成事件；`pending` 与 `unknown` 什么都不写。回执台账写进 `transport-receipts.jsonl`。不加 `--auto-confirm`（且 `BDL_AUTO_CONFIRM=false`）时，事件只排队进 `receipt-proposals.jsonl` 等人工确认。401、404、429、5xx、超时或无法识别的状态词一律记 `unknown`，绝不当退信——被限流的 API 不能把一个活邮箱关 180 天。`--map-status <word>` 只打印某个发信商状态词的映射，不发起调用。
 11. `status [--manifest <file>] [--channel <form|email>] [--target-domain <d>]` —— 把事件日志折叠成每个 `(target_domain, channel)` 的当前状态，回答「投放中 / 已投递 / 已上线」。每个状态都带 `next_action`，涉及计时的还带 `window.due_at`。用 manifest 播种时，未被 block 的目标会以 `not_started` 出现，不会有行凭空消失。
-12. `forms list|show|register|check` —— 表单指纹注册表。表单由 `sha256(方法 + action 路径 + 排序后的字段名)` 识别，绝不只看域名：同一站的「联系我们」与「提交资源」字段不同。未见过指纹返回 `needs_human_verify`；`register` 强制要求 `--reviewed-by`，带验证码或需登录的表单存为 `manual_only`。
-13. `plan-window --submitted-at <iso>` —— 计算 T+1/3/7/14/30 天抓取排期。
-14. `classify --outcome ... --http-status ...` —— 记录一次观测。403、超时、robots 拒绝记 `unknown`，绝不记 `absent`。
-15. `observe --target-url <page> --own-url <our-url>` —— 本地 L4 检测器。仅一次只读 GET：找到指向自身主机的锚点记 `found`；2xx 页面但无该锚点记 `absent`；任何抓取失败（403、超时、robots）记 `unknown`。可用 `--record <file>` 把观测追加为 JSONL。
-16. `scan --manifest <delivery-manifest.json> [--auto-confirm] [--out <dir>]` —— 自动扫描。对每个可观测行（含 `target_url` + `own_url`）跑 L4 检测，把结果追加进 `observations.jsonl` 并分类。加 `--auto-confirm`（或 `BDL_AUTO_CONFIRM=true`）时，命中的链接在本地标 `live` 并把确认提案排队进 `confirm-proposals.jsonl`。把共享 link-ledger 标记为 `live` 仍是独立的、需人工确认的 SEXTANT 步骤。
+12. `forms list|show|register|check|lookup` —— 表单指纹注册表。表单由 `sha256(方法 + action 路径 + 排序后的字段名)` 识别，绝不只看域名：同一站的「联系我们」与「提交资源」字段不同。未见过指纹返回 `needs_human_verify`；`register` 强制要求 `--reviewed-by`，带验证码或需登录的表单存为 `manual_only`。每条记录还带 `slot_map`（线上字段 → 槽位）与 `signature`（把计数器抹掉的字段名），这正是让一份已审阅映射能复用到另一个装同一插件的站点上的关键——见「填充一个提交表单」。
+13. `forms prefill --manifest <file> [--snapshot <file>] [--out <dir>]`，随后 `forms adopt --file <receipt> --reviewed-by <who>` —— 为浏览器用户脚本生成取值包，并把一次人工提交产出的映射存进注册表。
+14. `plan-window --submitted-at <iso>` —— 计算 T+1/3/7/14/30 天抓取排期。
+15. `classify --outcome ... --http-status ...` —— 记录一次观测。403、超时、robots 拒绝记 `unknown`，绝不记 `absent`。
+16. `observe --target-url <page> --own-url <our-url>` —— 本地 L4 检测器。仅一次只读 GET：找到指向自身主机的锚点记 `found`；2xx 页面但无该锚点记 `absent`；任何抓取失败（403、超时、robots）记 `unknown`。可用 `--record <file>` 把观测追加为 JSONL。
+17. `scan --manifest <delivery-manifest.json> [--auto-confirm] [--out <dir>]` —— 自动扫描。对每个可观测行（含 `target_url` + `own_url`）跑 L4 检测，把结果追加进 `observations.jsonl` 并分类。加 `--auto-confirm`（或 `BDL_AUTO_CONFIRM=true`）时，命中的链接在本地标 `live` 并把确认提案排队进 `confirm-proposals.jsonl`。把共享 link-ledger 标记为 `live` 仍是独立的、需人工确认的 SEXTANT 步骤。
+18. `replies --source <.eml|.mbox|目录> [--manifest <file>] [--auto-confirm]` —— 读取导出的回复，逐封匹配到目标域名，并把分类提案排队。见「分类回复」。
 
 ## 投影状态
 
@@ -117,6 +119,63 @@ agent_created: true
 - **一事一记**。定论以 `(provider id, action)` 为键，不用发信商并不精确的时间戳；重复轮询不会多写一条。
 - **不是提升**。回执属 L2：永不置 `live`，永不写共享 link-ledger，也永不构成对退信地址在冷却期内的重发许可。
 
+
+## 填充一个提交表单
+
+表单提交无法端到端自动化而仍保持诚实：验证码、条款、致谢页，都需要人来判断。但这道判断**前后**的一切都可以自动化，也确实自动化了：
+
+```
+forms prefill  ->  取值包（按槽位给值）  ->  用户脚本填充  ->  人工点击提交
+                                                        |
+              forms adopt  <-  回执（字段名 + 槽位映射 + 响应页 URL）
+                   |
+              record --action submitted --evidence <响应页 URL>
+```
+
+`forms prefill` 给每条可提交行写一个取值包。取值来自 manifest 行与渠道模板；`message` 与 draft 走同一组组合正文变体，并用同样的 5 词 shingle 阈值对照**本批次已产出**的文案——一个批次里二十个表单，不能带二十段一模一样的话。取值包绝不编造值：缺 `BDL_FROM_EMAIL`、缺落地 URL，或遇到 `phone` 槽位，都停在已记录的 gap 上，而不是一个看似合理的假值。`--snapshot` 提供发现阶段的 `form_shape` 与 `form_fields`；不给时每个包都是 `mapping: none`，由浏览器按 label 猜。
+
+包里的 `mapping` 声明是诚实所在：
+
+| `mapping` | 含义 | 由谁填充 |
+|---|---|---|
+| `exact` | 同样的方法 + action + 字段集此前已审阅 | 存下的 `slot_map` |
+| `shape` | 另一个站点，同样的表单形状**且**同样的字段名签名 | 那个站点的 `slot_map` |
+| `none` | 无可复用 | 浏览器启发式，随后人工确认 |
+
+`shape` 复用刻意要求签名与形状同时命中。形状只说「这个表单有 name、email、url、message」，不说哪个线上字段承载哪个槽位。两个 WPForms 站的字段都叫 `wpforms[fields][0..3]`，映射可以迁移；两个槽位相同的手写表单则不行，硬套就会把推广文案写进「订单号」框里。
+
+用户脚本（`assets/userscript/bdl-prefill.user.js`，粘进 Tampermonkey / Violentmonkey）只做填充：给它碰过的每个字段加虚线描边和槽位名提示，列出留给人的部分；绝不点提交、绝不解验证码、绝不填蜜罐。人工提交后，致谢页被捕获为回执：字段名、槽位映射、所填值、响应 URL 与响应文本指纹。
+
+`forms adopt` 拒绝非人工点击（R-520）、无槽位映射、或无响应 URL 的回执——没有致谢页的提交不算证据（L1）。它存下的只是「提交已被站点受理」这一层，绝不等于 `live`：`live` 仍只属于 L4 观测器。随后它打印确切的 `record --action submitted` 命令，事件依旧经由同一道人工审阅的门进入日志。
+
+## 分类回复
+
+整个闭环里最后一步人工操作是读回信。这里自动化的是判断**之前**的部分：把每封信匹配到它的目标域名，并说出正文里指向哪个类的信号。它不做判断。
+
+匹配顺序，证据最强者优先：
+
+1. `In-Reply-To` / `References` 指向我们的某个 `Message-ID`——local part 就是 manifest 的幂等键，恰好解析到一行；
+2. `From` 域名是闭环里已出现过的目标域名；
+3. 都不匹配：该信进入 `unmatched` 并附带提示，绝不猜测。
+
+分类给出 `reply_class`、**命中的短语**（不是正则）与置信度：
+
+| 类 | 置信度 | 后果 |
+|---|---|---|
+| `yes` | high 需要两个不同信号 | `--auto-confirm` 可代写事件 |
+| `no` | high 需要两个不同信号 | `--auto-confirm` 可代写事件 |
+| `pay` / `reciprocal` | 任意 | 永远只是提案：这两类会关闭域名（R-510） |
+| 投递状态通知（DSN） | —— | 按第 2 层提议为 `bounced`，附 DSN `Status` 码 |
+
+否定先于匹配处理：「非商业站点不收费用」是 `yes`，不是 `pay`。「很想收录你，但有 50 美元登录费」落在 `pay`——因为邀约与收费是同一句话。
+
+每一条分类都以**提案**形式进入 `reply-proposals.jsonl`，并展示命中信号；事件仍由人工命令写入：
+
+```
+record --action reply --reply-class yes --address ... --note "confirmed manually"
+```
+
+`--auto-confirm` 只代写高置信度的 `yes`/`no`，绝不代写 `pay`、`reciprocal` 或 `bounced`——这三者都会关闭一些东西，而分类器在「关闭」上犯的错，是把一扇正要打开的门焊死。
 
 ## 清单状态
 

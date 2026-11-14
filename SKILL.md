@@ -137,24 +137,33 @@ not in context and any CJK in email copy (R-522).
     answer "in delivery / delivered / live". Every state carries a `next_action`
     and, where a timer applies, `window.due_at`. Seeding from a manifest turns
     untouched (non-blocked) targets into `not_started` rows so nothing is invisible.
-12. `forms list|show|register|check` - the form fingerprint registry. A form is
+12. `forms list|show|register|check|lookup` - the form fingerprint registry. A form is
     identified by `sha256(method + action path + sorted field names)`, never by
     domain alone: a site's contact form and its submission form have different
     fields. An unseen fingerprint reports `needs_human_verify`; `register` demands
     `--reviewed-by`, and a CAPTCHA or login-gated form is stored as `manual_only`.
-13. `plan-window --submitted-at <iso>` - compute the T+1/3/7/14/30 day fetch schedule.
-14. `classify --outcome ... --http-status ...` - record an observation. A 403, timeout
+    Each entry also carries a `slot_map` (wire field -> slot) and a `signature`
+    (wire names with their counters blanked), which is what lets a reviewed map be
+    reused on another site running the same plugin - see *Filling a submission form*.
+13. `forms prefill --manifest <file> [--snapshot <file>] [--out <dir>]` then
+    `forms adopt --file <receipt> --reviewed-by <who>` - compose value packs for the
+    browser userscript and store the map a human submission produced.
+14. `plan-window --submitted-at <iso>` - compute the T+1/3/7/14/30 day fetch schedule.
+15. `classify --outcome ... --http-status ...` - record an observation. A 403, timeout
     or robots refusal is `unknown`, never `absent`.
-15. `observe --target-url <page> --own-url <our-url>` - the local L4 detector. A single
+16. `observe --target-url <page> --own-url <our-url>` - the local L4 detector. A single
     read-only GET; finds an anchor to the own host (`found`), reports `absent` only on
     a 2xx page with no such anchor, and reports `unknown` on any fetch failure (403,
     timeout, robots). Use `--record <file>` to append the observation as JSONL.
-16. `scan --manifest <delivery-manifest.json> [--auto-confirm] [--out <dir>]` - the
+17. `scan --manifest <delivery-manifest.json> [--auto-confirm] [--out <dir>]` - the
     auto-scan. For every observable row (has `target_url` + `own_url`), run the L4
     detector, append the result to `observations.jsonl`, and classify. With
     `--auto-confirm` (or `BDL_AUTO_CONFIRM=true`), a `found` link is marked `live`
     locally and a confirm proposal is queued in `confirm-proposals.jsonl`. Marking the
     shared link-ledger `live` is still a separate, human-confirmed SEXTANT step.
+18. `replies --source <.eml|.mbox|dir> [--manifest <file>] [--auto-confirm]` - read
+    exported replies, match each to its target domain, and queue a classification
+    proposal per reply. See *Classifying replies*.
 
 ## Projection states
 
@@ -200,6 +209,94 @@ Three constraints hold:
 - **Not a promotion.** A receipt is L2. It never sets `live`, never touches the
   shared link-ledger, and never authorises a resend to a bounced address before the
   cooldown ends.
+
+## Filling a submission form
+
+A form submission cannot be automated end to end and stay honest: a human judges the
+CAPTCHA, the terms, and the acknowledgement page. Everything around that judgement
+can be automated, and it is:
+
+```
+forms prefill  ->  pack (values per slot)  ->  userscript fills  ->  human clicks
+                                                          |
+               forms adopt  <-  receipt (fields + slot map + response URL)
+                    |
+               record --action submitted --evidence <response URL>
+```
+
+`forms prefill` writes one pack per submittable row. Values come from the manifest
+row and the channel template; `message` is picked from the same composed body
+variants as a draft, with the same 5-word-shingle ceiling measured against the copy
+already packed **in this batch**, so twenty forms in one batch do not carry twenty
+identical paragraphs. A pack never invents a value: no `BDL_FROM_EMAIL`, no landing
+URL, or a `phone` slot stops at a recorded gap instead of a plausible-looking fake.
+`--snapshot` supplies `form_shape` and `form_fields` from discovery; without it every
+pack is `mapping: none` and the browser guesses from labels.
+
+The declaration `mapping` is the honest part of a pack:
+
+| `mapping` | Meaning | What fills it |
+|---|---|---|
+| `exact` | this method + action + field set was reviewed before | the stored `slot_map` |
+| `shape` | another site, same form shape *and* same wire-name signature | that site's `slot_map` |
+| `none` | nothing to reuse | browser heuristics, then a human |
+
+`shape` reuse deliberately requires the signature as well as the shape. A shape says
+"this form has name, email, url, message"; it does not say which wire field carries
+which. Two WPForms sites both name their fields `wpforms[fields][0..3]`, so the
+mapping transfers; two bespoke forms with the same slots do not, and pretending
+otherwise writes a pitch into a "Order number" box.
+
+The userscript (`assets/userscript/bdl-prefill.user.js`, paste into Tampermonkey or
+Violentmonkey) fills, outlines every field it touched with a dashed border and the
+slot name, lists what it left for the human, and never clicks submit, never solves a
+CAPTCHA and never fills a honeypot. After the human submits, the acknowledgement page
+is captured as a receipt: field names, the slot map, the values used, the response URL
+and a fingerprint of the response text.
+
+`forms adopt` refuses a receipt that was not a human click (R-520), has no slot map,
+or has no response URL - a submission with no acknowledgement page is not evidence
+(L1). What it stores is a submission acknowledgement, not a live link: `live` remains
+the L4 observer's alone. It then prints the exact `record --action submitted` command,
+so the event still enters the log through the same reviewed door.
+
+## Classifying replies
+
+The last manual step in the loop is reading what came back. What this automates is
+the part before the judgement: matching each message to its target domain and naming
+the signals in the text. What it does not do is decide.
+
+Matching, best evidence first:
+
+1. `In-Reply-To` / `References` names one of our `Message-ID`s - the local part is the
+   manifest's idempotency key, which resolves to one row exactly;
+2. the `From` domain is a target domain already known to the loop;
+3. nothing matches: the message is reported under `unmatched` with a hint, never guessed.
+
+Classification produces a `reply_class` with the **matched phrases** (not the regexes)
+and a confidence:
+
+| Class | Confidence | Consequence |
+|---|---|---|
+| `yes` | high needs two distinct signals | `--auto-confirm` may write the event |
+| `no` | high needs two distinct signals | `--auto-confirm` may write the event |
+| `pay` / `reciprocal` | any | always a proposal: these close a domain (R-510) |
+| a delivery status notification | - | proposed as `bounced` (L2), with the DSN `Status` code |
+
+Negation is handled before matching: "there is no fee for non-commercial sites" is a
+`yes`, not a `pay`. A "we'd love to add it, there is a $50 listing fee" lands on
+`pay`, because the offer and the fee are the same sentence.
+
+Every classification leaves as a **proposal** to `reply-proposals.jsonl` with the
+signals shown, and the event is still written by a human command:
+
+```
+record --action reply --reply-class yes --address ... --note "confirmed manually"
+```
+
+`--auto-confirm` writes only `yes`/`no` at high confidence, never a `pay`, never a
+`reciprocal`, and never a bounce - all three close things, and a classifier's error
+in closing things is a door shut on a site that was about to link.
 
 ## Manifest statuses
 
