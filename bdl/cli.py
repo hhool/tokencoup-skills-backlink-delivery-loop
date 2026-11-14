@@ -172,6 +172,15 @@ def _parser() -> argparse.ArgumentParser:
     st.add_argument("--center-domain", default="")
     st.add_argument("--limit", type=int, default=0, help="Truncate the row list (0 = all)")
 
+    ui = sub.add_parser("serve", help="Run the local review UI (127.0.0.1 only)")
+    ui.add_argument("--manifest", required=True, help="delivery-manifest.json (or its batch folder)")
+    ui.add_argument("--drafts", default="data/drafts", help="Directory of .eml drafts")
+    ui.add_argument("--records-dir", default="")
+    ui.add_argument("--packs", default="", help="Directory of prefill packs to offer for download")
+    ui.add_argument("--center-domain", default="")
+    ui.add_argument("--host", default="127.0.0.1")
+    ui.add_argument("--port", type=int, default=8765)
+
     forms = sub.add_parser("forms", help="Form fingerprint registry for submission forms")
     forms_sub = forms.add_subparsers(dest="forms_command", required=True)
     forms_sub.add_parser("list").add_argument("--domain", default="")
@@ -682,6 +691,28 @@ def _run(args: argparse.Namespace) -> dict:
             unmatched=len(report["unmatched"]),
         )
         return {"ok": True, "dry_run": bool(args.dry_run), **report}
+
+    if args.command == "serve":
+        from .server import serve
+
+        url, server = serve(
+            manifest_path=args.manifest,
+            drafts_dir=args.drafts,
+            records_dir=args.records_dir or cfg.records_dir,
+            packs_dir=args.packs,
+            center_domain=args.center_domain or cfg.center_domain,
+            host=args.host,
+            port=args.port,
+        )
+        logger.emit("review_server_listening", url=url, manifest=args.manifest)
+        print(url)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.server_close()
+        return {"ok": True, "url": url}
 
     if args.command == "status":
         from .adapters.events import load_events, normalise_legacy
