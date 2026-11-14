@@ -189,6 +189,11 @@ def draft_batch(
         }
         if row.submission_url:
             headers["X-BDL-Submission-URL"] = row.submission_url
+        # Provenance: the page the address was read from. A form target is
+        # identified by X-BDL-Submission-URL above; an email target must say
+        # WHERE the address was found, or the operator re-audits by hand.
+        if row.contact_source_url:
+            headers["X-BDL-Discovered-On"] = row.contact_source_url
 
         draft = Draft(
             target_domain=row.target_domain,

@@ -130,6 +130,34 @@ class ServerTest(unittest.TestCase):
                        "ready_to_submit", "no_channel", "Resource suggestion"):
             self.assertIn(needle, markup)
 
+    def test_dashboard_links_form_url_and_discovery_page(self):
+        # A form target gets a link to the form page; an email target gets a
+        # link to the page the address was read from.
+        manifest = json.loads(json.dumps(MANIFEST))
+        manifest["rows"][0]["contact_source_url"] = "https://example.com/contact"
+        (self.base / "manifest" / "delivery-manifest.json").write_text(json.dumps(manifest))
+        self.server.RequestHandlerClass.state.switch(
+            self.base / "manifest", self.base / "drafts"
+        )
+        _, markup = self._get("/")
+        self.assertIn("https://form.org/contact", markup)
+        self.assertIn("form page", markup)
+        self.assertIn("https://example.com/contact", markup)
+        self.assertIn("found on page", markup)
+
+    def test_draft_view_shows_provenance_from_headers(self):
+        eml = EML.replace(
+            "X-BDL-Idempotency-Key: k1\r\n",
+            "X-BDL-Idempotency-Key: k1\r\n"
+            "X-BDL-Discovered-On: https://example.com/contact\r\n",
+        )
+        (self.base / "drafts" / "example.com.eml").write_text(eml)
+        status, markup = self._get("/drafts/example.com")
+        self.assertEqual(status, 200)
+        self.assertIn("Address found on", markup)
+        self.assertIn("https://example.com/contact", markup)
+        self.assertNotIn("Form page on the same site", markup)
+
     def test_draft_preview_and_raw_download(self):
         status, markup = self._get("/drafts/example.com")
         self.assertIn("Please consider listing soundbuttons.cc", markup)

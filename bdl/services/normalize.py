@@ -126,6 +126,7 @@ def build_rows(
         submission_url: Optional[str] = None
         own_url: Optional[str] = None
         contact_email: Optional[str] = None
+        contact_source_url: Optional[str] = None
         channel_source = "prose"
         own_url_source = "prose"
 
@@ -137,6 +138,7 @@ def build_rows(
             channel_source = "discovery"
         if prospect.contact_email:
             contact_email = prospect.contact_email
+            contact_source_url = prospect.contact_source_url
             channel_source = "discovery"
 
         if contact:
@@ -228,6 +230,7 @@ def build_rows(
                 own_url=own_url,
                 contact_email=contact_email,
                 contact_state=contact_state,
+                contact_source_url=contact_source_url,
                 channel_type=channel_type,
                 type_key=prospect.type_key,
                 status=status,

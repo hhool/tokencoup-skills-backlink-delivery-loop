@@ -121,6 +121,9 @@ class ManifestRow:
     channel_type: str
     type_key: str
     status: str
+    # Page the contact address was read from (discovery overlay). Prose hints
+    # carry no provenance URL, so absent means "from prose", not "unknown".
+    contact_source_url: Optional[str] = None
     reasons: List[str] = field(default_factory=list)
     gaps: List[str] = field(default_factory=list)
     idempotency_key: str = ""

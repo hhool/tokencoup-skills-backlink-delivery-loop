@@ -15,6 +15,10 @@ instead of silently dropping information:
   * ``already_have``  -> ``acquired``
   * ``is_gap``        -> passed through, AND-ed with ``valid`` (an invalid record
                         is not a gap). Both folds are counted in ``diagnostics``.
+  * discovery columns -> ``submission_url``, ``contact_email``, ``contact_source``,
+                        ``contact_source_url`` are carried into the 1.1.0
+                        discovery block, but only values that look like evidence
+                        (absolute URL, plausible address, schema enum).
   * unmapped columns  -> reported as ``dropped_columns``; they are commercial
                         scores (authority, relevance, obtainability, tranco rank,
                         type labels) that the ledger does not store.
@@ -42,6 +46,9 @@ PROSPECTOR_REPO = "tokencoup-skills-backlink-prospector"
 _MAPPED = {
     "url", "domain", "type_key", "priority", "http_status",
     "is_gap", "is_competitor", "already_have", "valid", "note", "note_en",
+    # Discovery block (1.1.0). A CSV row that names its channel surfaces saves
+    # a discovery pass; the value must still look like evidence, see below.
+    "submission_url", "contact_email", "contact_source", "contact_source_url",
 }
 
 # Columns that are known but have no home in the closed contract.
@@ -55,6 +62,16 @@ _FILENAME_RE = re.compile(
 )
 _TRUE = {"true", "1", "yes", "y", "t"}
 _FALSE = {"false", "0", "no", "n", "f"}
+# contact_source enum from the snapshot schema; anything else is dropped, not
+# coerced - provenance that has to be cleaned up is not provenance.
+_SOURCES = {"mailto", "prose", "form_page", "manual"}
+
+
+def _url_or_none(raw: Optional[str]) -> Optional[str]:
+    text = (raw or "").strip()
+    if text.startswith("http://") or text.startswith("https://"):
+        return text
+    return None
 
 
 def _bool(raw: Optional[str]) -> Optional[bool]:
@@ -167,6 +184,23 @@ def import_csv(
             "first_seen": None,
             "last_seen": None,
         }
+
+        # Discovery columns: an address is only copied when it looks like one,
+        # a URL only when it is absolute, and a source only when it is in the
+        # schema enum. A malformed value is dropped, never "cleaned up" into
+        # something that reads like evidence.
+        address = (row.get("contact_email") or "").strip()
+        if "@" in address and "." in address.split("@", 1)[1]:
+            record["contact_email"] = address
+            source = (row.get("contact_source") or "").strip().lower()
+            if source in _SOURCES:
+                record["contact_source"] = source
+            page = _url_or_none(row.get("contact_source_url"))
+            if page:
+                record["contact_source_url"] = page
+        form_url = _url_or_none(row.get("submission_url"))
+        if form_url:
+            record["submission_url"] = form_url
 
         existing = kept.get(key)
         if existing is not None:

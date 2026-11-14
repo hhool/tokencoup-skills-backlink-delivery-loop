@@ -109,7 +109,10 @@ not in context and any CJK in email copy (R-522).
 8. `draft --manifest <delivery-manifest.json> --out <dir> [--from <addr>]
    [--ceiling 0.80] [--domain <d>] [--dry-run]` - turn the manifest's email rows into
    `.eml` files. Subject and body come from the channel template; provenance travels
-   in `X-BDL-*` headers and a deterministic `Message-ID`. Templates carry several
+   in `X-BDL-*` headers and a deterministic `Message-ID`. Each draft says where its
+   channel lives: a form target carries the form URL in `X-BDL-Submission-URL`, an
+   email target carries the page the address was read from in `X-BDL-Discovered-On`.
+   Templates carry several
    bodies per channel, and the draft picks the first one whose 5-word-shingle
    similarity to copy already drafted **in this batch** stays under the ceiling -
    measured with domains and URLs masked, because one template with the domain
@@ -169,7 +172,10 @@ not in context and any CJK in email copy (R-522).
     endpoints: POST `/record` (the `record` command's validation, behind a form
     click) and POST `/import` (upload a prospect CSV, which runs
     `import-prospects` -> `build-manifest` -> `draft` and swaps the dashboard to
-    the new batch). Nothing is sent from the page; `live` stays L4's judgement.
+    the new batch). Each row's channel cell links its evidence: a form target
+    links *form page* (the submission URL), an email target links *found on page*
+    (where the address was discovered), and the draft view repeats both. Nothing
+    is sent from the page; `live` stays L4's judgement.
 
 ## Projection states
 

@@ -92,6 +92,8 @@ def _draft_info(drafts_dir: str | Path, domain: str) -> Optional[Dict[str, str]]
         "to": str(message.get("To") or ""),
         "subject": str(message.get("Subject") or ""),
         "provider_id": str(message.get("X-BDL-Provider-Id") or ""),
+        "submission_url": str(message.get("X-BDL-Submission-URL") or ""),
+        "discovered_on": str(message.get("X-BDL-Discovered-On") or ""),
         "body": body.strip(),
         "path": str(path),
     }
@@ -411,7 +413,9 @@ def render_dashboard(state: ReviewState, flash: str = "", error: str = "") -> st
         else:
             draft_cell = "<span class='muted'>-</span>"
 
-        # Channel cell
+        # Channel cell: form targets link to the form page, email targets to
+        # the page the address was read from - the operator should never have
+        # to re-derive where a channel came from.
         channel_bits = [_esc(row.get("channel_type") or "")] + [
             _esc(c) for c in channels
         ]
@@ -419,6 +423,14 @@ def render_dashboard(state: ReviewState, flash: str = "", error: str = "") -> st
             channel_bits.append(
                 "<a href='%s' target='_blank' rel='noreferrer'>form page</a>"
                 % _esc(submission)
+            )
+        discovered = str(row.get("contact_source_url") or "")
+        if not discovered and draft:
+            discovered = draft.get("discovered_on") or ""
+        if discovered:
+            channel_bits.append(
+                "<a href='%s' target='_blank' rel='noreferrer'>found on page</a>"
+                % _esc(discovered)
             )
         channel_cell = "<br>".join(channel_bits)
 
@@ -485,7 +497,8 @@ def render_import_page(state: ReviewState) -> str:
         "<li class='muted'>from address: %s</li></ul>" % (prose, from_email),
         "<p class='muted'>Column contract: <code>domain</code> required; also read: "
         "<code>url, type_key, priority, http_status, valid, already_have, "
-        "is_competitor, is_gap, note, note_en</code>. Other columns are reported "
+        "is_competitor, is_gap, note, note_en, submission_url, contact_email, "
+        "contact_source, contact_source_url</code>. Other columns are reported "
         "as dropped.</p>",
     ]
     return _page("Import CSV", "".join(body))
@@ -500,8 +513,20 @@ def render_draft(state: ReviewState, domain: str) -> str:
         "<a href='/drafts/%s/raw'>download .eml</a></p>" % _esc(domain),
         "<h1>%s</h1>" % _esc(draft["subject"]),
         "<p class='muted'>To: %s</p>" % _esc(draft["to"]),
-        "<pre>%s</pre>" % _esc(draft["body"]),
     ]
+    if draft.get("discovered_on"):
+        body.append(
+            "<p class='muted'>Address found on: "
+            "<a href='%s' target='_blank' rel='noreferrer'>%s</a></p>"
+            % (_esc(draft["discovered_on"]), _esc(draft["discovered_on"]))
+        )
+    if draft.get("submission_url"):
+        body.append(
+            "<p class='muted'>Form page on the same site: "
+            "<a href='%s' target='_blank' rel='noreferrer'>%s</a></p>"
+            % (_esc(draft["submission_url"]), _esc(draft["submission_url"]))
+        )
+    body.append("<pre>%s</pre>" % _esc(draft["body"]))
     return _page("Draft - %s" % domain, "".join(body))
 
 

@@ -124,5 +124,78 @@ class CsvImportTests(unittest.TestCase):
         self.assertEqual(by_domain["good.com"].status, "needs_enrichment")
 
 
+class DiscoveryColumnTests(unittest.TestCase):
+    """Channel columns survive the CSV, but only values that look like evidence."""
+
+    DISCOVERY_HEADER = (
+        "url,domain,type_key,priority,http_status,valid,already_have,is_competitor,"
+        "is_gap,submission_url,contact_email,contact_source,contact_source_url\n"
+    )
+
+    ROWS = (
+        # A clean row: form URL and an address with its discovery page.
+        "https://formy.com,formy.com,resource,50,200,True,False,False,True,"
+        "https://formy.com/submit,,,"
+        "https://formy.com/contact\n"
+        # An address row with provenance.
+        "https://maily.com,maily.com,resource,50,200,True,False,False,True,"
+        ",hello@maily.com,mailto,https://maily.com/about\n"
+        # Junk is dropped, not cleaned up: relative URL, bad source word,
+        # address without a real domain, discovery page without an address.
+        "https://junky.com,junky.com,resource,50,200,True,False,False,True,"
+        "/submit,hello@junky,magic_page,about.html\n"
+        "https://lone.com,lone.com,resource,50,200,True,False,False,True,"
+        "https://lone.com/submit,,,https://lone.com/contact\n"
+    )
+
+    def _import(self, tmp: Path):
+        path = tmp / "prospects.csv"
+        path.write_text(self.DISCOVERY_HEADER + self.ROWS, encoding="utf-8")
+        return import_csv(path, center_domain="soundbuttons.cc")
+
+    def test_clean_values_reach_the_discovery_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = self._import(Path(tmp))
+        by_domain = {item["domain"]: item for item in snapshot["prospects"]}
+
+        self.assertEqual(by_domain["formy.com"]["submission_url"], "https://formy.com/submit")
+        self.assertEqual(by_domain["maily.com"]["contact_email"], "hello@maily.com")
+        self.assertEqual(by_domain["maily.com"]["contact_source"], "mailto")
+        self.assertEqual(by_domain["maily.com"]["contact_source_url"], "https://maily.com/about")
+
+    def test_malformed_values_are_dropped_not_coerced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = self._import(Path(tmp))
+        junky = {item["domain"]: item for item in snapshot["prospects"]}["junky.com"]
+        self.assertNotIn("submission_url", junky)
+        self.assertNotIn("contact_email", junky)
+        self.assertNotIn("contact_source", junky)
+        self.assertNotIn("contact_source_url", junky)
+
+    def test_a_page_without_an_address_is_not_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = self._import(Path(tmp))
+        lone = {item["domain"]: item for item in snapshot["prospects"]}["lone.com"]
+        self.assertEqual(lone["submission_url"], "https://lone.com/submit")
+        self.assertNotIn("contact_source_url", lone)
+
+    def test_discovery_rows_flow_into_the_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = self._import(Path(tmp))
+        model = Snapshot(
+            center_domain=snapshot["center_domain"],
+            schema_version=snapshot["schema_version"],
+            generated_at=snapshot["generated_at"],
+            source=snapshot["source"],
+            prospects=[Prospect(**item) for item in snapshot["prospects"]],
+            file_hash="sha256:" + "0" * 64,
+        )
+        rows = build_rows(model, [], "https://soundbuttons.cc", set(), [],
+                          datetime(2026, 11, 15, tzinfo=timezone.utc))
+        by_domain = {row.target_domain: row for row in rows}
+        self.assertEqual(by_domain["maily.com"].contact_source_url, "https://maily.com/about")
+        self.assertEqual(by_domain["formy.com"].submission_url, "https://formy.com/submit")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,20 +22,23 @@ CENTER = "soundbuttons.cc"
 
 
 def make_row(domain="example.com", status="ready_to_submit", channels=("email",),
-             email_addr=None, channel_type="asset", target_url=None):
+             email_addr=None, channel_type="asset", target_url=None,
+             contact_source_url=None, submission_url=None):
     return ManifestRow(
         prospect_id=domain + "#" + channel_type,
         center_domain=CENTER,
         target_domain=domain,
         candidate_url="https://" + domain,
         target_url=target_url,
-        submission_url=None if "form" not in channels else "https://" + domain + "/submit",
+        submission_url=submission_url if submission_url is not None
+        else ("https://" + domain + "/submit" if "form" in channels else None),
         own_url="https://soundbuttons.cc/free-soundboard",
         contact_email=email_addr if email_addr is not None else "hi@" + domain,
         contact_state="candidate",
         channel_type=channel_type,
         type_key="resource",
         status=status,
+        contact_source_url=contact_source_url,
         idempotency_key="key-" + domain,
         channels=list(channels),
     )
@@ -285,6 +288,41 @@ class ManifestRoundTripTests(unittest.TestCase):
             out_dir=tempfile.mkdtemp(), now=NOW,
         )
         self.assertEqual(report["counts"]["drafted"], 1)
+
+
+class ProvenanceHeaderTests(unittest.TestCase):
+    """A draft must say where its channel lives: form page or discovery page."""
+
+    def _write_one(self, **row_kwargs):
+        tmp = tempfile.mkdtemp()
+        row = make_row(**row_kwargs)
+        draft_batch(
+            [row], templates=TemplateSet.builtin(), center_domain=CENTER,
+            own_site_base="https://soundbuttons.cc",
+            from_addr="outreach@soundbuttons.cc", out_dir=tmp, now=NOW,
+        )
+        return email.message_from_bytes(
+            (Path(tmp) / (row.target_domain + ".eml")).read_bytes()
+        )
+
+    def test_email_row_carries_the_discovery_page(self):
+        message = self._write_one(contact_source_url="https://example.com/contact")
+        self.assertEqual(str(message["X-BDL-Discovered-On"]), "https://example.com/contact")
+
+    def test_email_row_without_provenance_has_no_invented_page(self):
+        message = self._write_one()
+        self.assertIsNone(message["X-BDL-Discovered-On"])
+
+    def test_form_target_carries_the_form_url(self):
+        message = self._write_one(channels=("form", "email"),
+                                  submission_url="https://example.com/submit")
+        self.assertEqual(str(message["X-BDL-Submission-URL"]), "https://example.com/submit")
+
+    def test_form_url_and_discovery_page_are_independent(self):
+        message = self._write_one(channels=("form", "email"),
+                                  contact_source_url="https://example.com/about")
+        self.assertEqual(str(message["X-BDL-Submission-URL"]), "https://example.com/submit")
+        self.assertEqual(str(message["X-BDL-Discovered-On"]), "https://example.com/about")
 
 
 if __name__ == "__main__":
