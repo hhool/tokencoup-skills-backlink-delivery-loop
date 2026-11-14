@@ -37,6 +37,8 @@ class Config:
     history_dir: Path
     templates_dir: Path
     observation_dir: Path
+    records_dir: Path
+    forms_dir: Path
     center_domain: str
     own_site_base: str
     tier: str
@@ -45,6 +47,8 @@ class Config:
     log_level: str
     deferral_window_days: int = 90
     daily_ceiling: int = 100
+    receipt_window_days: int = 30
+    contact_lost_days: int = 180
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "Config":
@@ -76,6 +80,21 @@ class Config:
         if ceiling < 1:
             raise ConfigError("Daily ceiling must be positive", env="BDL_DAILY_CEILING", value=str(ceiling))
 
+        receipt = int(source.get("BDL_RECEIPT_WINDOW_DAYS", "30")) if source.get("BDL_RECEIPT_WINDOW_DAYS") else 30
+        if receipt < 1:
+            raise ConfigError(
+                "Receipt window must be at least one day",
+                env="BDL_RECEIPT_WINDOW_DAYS",
+                value=str(receipt),
+            )
+        lost = int(source.get("BDL_CONTACT_LOST_DAYS", "180")) if source.get("BDL_CONTACT_LOST_DAYS") else 180
+        if lost < 1:
+            raise ConfigError(
+                "Contact-lost cooldown must be at least one day",
+                env="BDL_CONTACT_LOST_DAYS",
+                value=str(lost),
+            )
+
         center = source.get("BDL_CENTER_DOMAIN", "").strip().lower()
         base = source.get("BDL_OWN_SITE_BASE", "").strip().rstrip("/")
         if not base and center:
@@ -89,6 +108,8 @@ class Config:
             history_dir=_path(home, "BDL_HISTORY_DIR", "data/history", source),
             templates_dir=_path(home, "BDL_TEMPLATES_DIR", "data/templates", source),
             observation_dir=_path(home, "BDL_OBSERVATION_DIR", "data/observations", source),
+            records_dir=_path(home, "BDL_RECORDS_DIR", "data/records", source),
+            forms_dir=_path(home, "BDL_FORMS_DIR", "data/forms", source),
             center_domain=center,
             own_site_base=base,
             tier=tier,
@@ -97,4 +118,6 @@ class Config:
             log_level=level,
             deferral_window_days=deferral,
             daily_ceiling=ceiling,
+            receipt_window_days=receipt,
+            contact_lost_days=lost,
         )

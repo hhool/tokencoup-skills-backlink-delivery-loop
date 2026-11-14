@@ -33,6 +33,21 @@ def as_dict(record: object) -> dict:
     return asdict(record)
 
 
+# A domain is not "either a form or an email": the delivery channel is a property
+# of the landing page, and one domain may offer both. Counting and cooldowns are
+# keyed on (center_domain, target_domain, channel), never on the domain alone.
+DELIVERY_CHANNELS = ("form", "email")
+
+
+def delivery_channels(submission_url: Optional[str], contact_email: Optional[str]) -> List[str]:
+    found: List[str] = []
+    if submission_url:
+        found.append("form")
+    if contact_email:
+        found.append("email")
+    return found
+
+
 @dataclass
 class Snapshot:
     center_domain: str
@@ -96,6 +111,7 @@ class ManifestRow:
     gaps: List[str] = field(default_factory=list)
     idempotency_key: str = ""
     content: Optional[dict] = None
+    channels: List[str] = field(default_factory=list)
 
 
 def absolute_url(value: str, base: str) -> Optional[str]:

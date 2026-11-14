@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from . import __version__
+from .adapters.events import ACTIONS
 from .config import Config
 from .errors import DeliveryError
 from .log import JsonLogger, new_batch_id
@@ -77,6 +78,16 @@ def _parser() -> argparse.ArgumentParser:
     export.add_argument("--repo", default="tokencoup-skills-backlink-prospector",
                         help="Source repo label recorded in snapshot.source.repo")
 
+    imp = sub.add_parser(
+        "import-prospects",
+        help="Import a backlink-prospector CSV export as a contract-C snapshot",
+    )
+    imp.add_argument("--csv", required=True, help="Path to backlink-prospects-<domain>-<stamp>.csv")
+    imp.add_argument("--out", default="", help="Write the snapshot here (omit with --dry-run)")
+    imp.add_argument("--center-domain", default="", help="Defaults to BDL_CENTER_DOMAIN, then the file name")
+    imp.add_argument("--repo", default="tokencoup-skills-backlink-prospector")
+    imp.add_argument("--dry-run", action="store_true", help="Report the mapping without writing")
+
     observe = sub.add_parser(
         "observe",
         help="Fetch a target page and check for a live backlink (L4, read-only GET)",
@@ -84,6 +95,53 @@ def _parser() -> argparse.ArgumentParser:
     observe.add_argument("--target-url", required=True, help="Third-party page to inspect")
     observe.add_argument("--own-url", required=True, help="Our URL expected to appear as a backlink")
     observe.add_argument("--record", default="", help="Append the observation as JSONL to this path")
+
+    rec = sub.add_parser("record", help="Record one delivery action (append-only, idempotent)")
+    rec.add_argument("--target-domain", required=True)
+    rec.add_argument("--channel", required=True, choices=["form", "email"])
+    rec.add_argument("--action", required=True, choices=list(ACTIONS))
+    rec.add_argument("--at", default="", help="ISO-8601, defaults to now")
+    rec.add_argument("--address", default="", help="Mailbox involved (required for email events)")
+    rec.add_argument("--provider-id", default="", help="Required for a send")
+    rec.add_argument("--evidence", default="", help="Screenshot path or thank-you URL (required for a submission)")
+    rec.add_argument("--reply-class", default="", choices=["", "yes", "no", "pay", "reciprocal"])
+    rec.add_argument("--note", default="")
+    rec.add_argument("--actor", default="", help="Who performed the action")
+    rec.add_argument("--center-domain", default="")
+    rec.add_argument("--records-dir", default="")
+
+    st = sub.add_parser("status", help="Current state per domain and channel, folded from the event log")
+    st.add_argument("--records-dir", default="")
+    st.add_argument("--observations-dir", default="")
+    st.add_argument("--history", default="", help="Legacy send-history file to seed state from")
+    st.add_argument("--manifest", default="", help="Seed untouched rows from a delivery manifest")
+    st.add_argument("--channel", default="", choices=["", "form", "email"])
+    st.add_argument("--target-domain", default="")
+    st.add_argument("--center-domain", default="")
+    st.add_argument("--limit", type=int, default=0, help="Truncate the row list (0 = all)")
+
+    forms = sub.add_parser("forms", help="Form fingerprint registry for submission forms")
+    forms_sub = forms.add_subparsers(dest="forms_command", required=True)
+    forms_sub.add_parser("list").add_argument("--domain", default="")
+    forms_show = forms_sub.add_parser("show")
+    forms_show.add_argument("--fingerprint", required=True)
+    forms_register = forms_sub.add_parser("register")
+    forms_register.add_argument("--domain", required=True)
+    forms_register.add_argument("--method", default="POST")
+    forms_register.add_argument("--action", required=True, help="Form action URL or path")
+    forms_register.add_argument("--fields", required=True, help="Comma-separated field names as rendered")
+    forms_register.add_argument("--map", action="append", default=[], help="label=value, repeatable")
+    forms_register.add_argument("--success-selector", default="")
+    forms_register.add_argument("--evidence", default="")
+    forms_register.add_argument("--captcha", action="store_true")
+    forms_register.add_argument("--requires-account", action="store_true")
+    forms_register.add_argument("--reviewed-by", required=True, help="Named human who verified the form")
+    forms_register.add_argument("--notes", default="")
+    forms_check = forms_sub.add_parser("check")
+    forms_check.add_argument("--method", default="POST")
+    forms_check.add_argument("--action", required=True)
+    forms_check.add_argument("--fields", required=True)
+    forms_check.add_argument("--forms-dir", default="")
     return parser
 
 
@@ -127,7 +185,18 @@ def _run(args: argparse.Namespace) -> dict:
                 "snapshots": str(cfg.snapshot_dir),
                 "prose": str(cfg.prose_dir),
                 "out": str(cfg.out_dir),
+                "records": str(cfg.records_dir),
+                "observations": str(cfg.observation_dir),
+                "forms": str(cfg.forms_dir),
+                "templates": str(cfg.templates_dir),
             },
+            "windows": {
+                "deferral_days": cfg.deferral_window_days,
+                "receipt_days": cfg.receipt_window_days,
+                "contact_lost_days": cfg.contact_lost_days,
+                "daily_ceiling": cfg.daily_ceiling,
+            },
+            "auto_confirm": cfg.auto_confirm,
             "policy": "Human review is required before any transmission (R-520 / R-530 tier B).",
         }
 
@@ -251,6 +320,34 @@ def _run(args: argparse.Namespace) -> dict:
             "content_hash": snapshot["source"]["content_hash"],
         }
 
+    if args.command == "import-prospects":
+        from .adapters.csv_import import import_csv
+
+        diagnostics: dict = {}
+        snapshot = import_csv(
+            args.csv,
+            args.center_domain or cfg.center_domain,
+            args.repo,
+            diagnostics,
+        )
+        result = {
+            "ok": True,
+            "center_domain": snapshot["center_domain"],
+            "prospects": len(snapshot["prospects"]),
+            "content_hash": snapshot["source"]["content_hash"],
+            "mapping": diagnostics,
+        }
+        if args.dry_run:
+            result["dry_run"] = True
+            return result
+        if not args.out:
+            raise DeliveryError("An output path is required", hint="--out or --dry-run")
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        result["out"] = str(out)
+        return result
+
     if args.command == "observe":
         from .services.observe import default_fetcher, observe_target
 
@@ -261,6 +358,140 @@ def _run(args: argparse.Namespace) -> dict:
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         return {"ok": True, "observation": record}
+
+    if args.command == "record":
+        from .adapters.events import append_event, load_events
+        from .services.record import build_event, policy_notice
+        from .services.state import project
+
+        center = args.center_domain or cfg.center_domain
+        event = build_event(
+            center_domain=center,
+            target_domain=args.target_domain,
+            channel=args.channel,
+            action=args.action,
+            at=args.at,
+            address=args.address,
+            provider_id=args.provider_id,
+            evidence=args.evidence,
+            reply_class=args.reply_class,
+            note=args.note,
+            actor=args.actor,
+        )
+        records_dir = Path(args.records_dir or str(cfg.records_dir))
+        path = records_dir / ("events-%s.jsonl" % event["center_domain"])
+        _, appended = append_event(path, event)
+        state = project(
+            load_events([path]),
+            [],
+            receipt_window_days=cfg.receipt_window_days,
+            contact_lost_days=cfg.contact_lost_days,
+        )
+        current = [
+            row for row in state["rows"]
+            if row["target_domain"] == event["target_domain"] and row["channel"] == event["channel"]
+        ]
+        notice = policy_notice(event)
+        if notice and appended:
+            logger.emit("policy_refusal_recorded", target_domain=event["target_domain"],
+                        reply_class=event.get("reply_class"))
+        return {
+            "ok": True,
+            "appended": appended,
+            "duplicate": not appended,
+            "record_file": str(path),
+            "event": event,
+            "state": current[0] if current else None,
+            "policy": notice or None,
+            "note": "Append-only. A repeated event id is refused, not duplicated.",
+        }
+
+    if args.command == "status":
+        from .adapters.events import load_events, normalise_legacy
+        from .adapters.observation import load_observations_dir
+        from .services.state import merge_seeds, project, seed_rows_from_manifest
+
+        center = args.center_domain or cfg.center_domain
+        records_dir = Path(args.records_dir or str(cfg.records_dir))
+        observations_dir = Path(args.observations_dir or str(cfg.observation_dir))
+
+        events = load_events([records_dir])
+        if args.history:
+            events.extend(normalise_legacy(load_events([args.history])))
+        observations = load_observations_dir(observations_dir)
+
+        seeds: list = []
+        if args.manifest:
+            manifest_path = Path(args.manifest)
+            if not manifest_path.is_file():
+                raise DeliveryError("Manifest not found", path=str(manifest_path))
+            seeds = seed_rows_from_manifest(
+                json.loads(manifest_path.read_text(encoding="utf-8"))
+            )
+        if seeds:
+            events = merge_seeds(events, seeds)
+
+        result = project(
+            events,
+            observations,
+            receipt_window_days=cfg.receipt_window_days,
+            contact_lost_days=cfg.contact_lost_days,
+            center_domain=center,
+        )
+        rows = result["rows"]
+        if args.channel:
+            rows = [row for row in rows if row["channel"] == args.channel]
+        if args.target_domain:
+            wanted = args.target_domain.strip().lower()
+            rows = [row for row in rows if row["target_domain"] == wanted]
+        total = len(rows)
+        if args.limit > 0:
+            rows = rows[: args.limit]
+        result["rows"] = rows
+        result["returned"] = len(rows)
+        result["matched"] = total
+        return {"ok": True, **result}
+
+    if args.command == "forms":
+        from .adapters import forms as registry
+
+        directory = Path(getattr(args, "forms_dir", "") or str(cfg.forms_dir))
+        if args.forms_command == "list":
+            entries = registry.listing(directory, args.domain)
+            return {"ok": True, "forms_dir": str(directory), "count": len(entries), "entries": entries}
+        if args.forms_command == "show":
+            entry = registry.show(directory, key=args.fingerprint)
+            return {"ok": True, "forms_dir": str(directory), "entry": entry[0]}
+        if args.forms_command == "register":
+            names = [name.strip() for name in args.fields.split(",") if name.strip()]
+            field_map = {}
+            for pair in args.map or []:
+                if "=" not in pair:
+                    raise DeliveryError("Field map entries must be label=value", value=pair)
+                label, value = pair.split("=", 1)
+                field_map[label.strip()] = value.strip()
+            entry = registry.register(
+                directory,
+                domain=args.domain,
+                method=args.method,
+                action=args.action,
+                field_names=names,
+                field_map=field_map,
+                reviewed_by=args.reviewed_by,
+                success_selector=args.success_selector,
+                evidence=args.evidence,
+                captcha=args.captcha,
+                requires_account=args.requires_account,
+                notes=args.notes,
+            )
+            return {
+                "ok": True,
+                "forms_dir": str(directory),
+                "entry": entry,
+                "note": "Registered. Next encounter prefills; a human still clicks submit.",
+            }
+        names = [name.strip() for name in args.fields.split(",") if name.strip()]
+        return {"ok": True, **registry.check(directory, args.method, args.action, names)}
 
     raise DeliveryError("Unknown command", command=getattr(args, "command", ""))
 

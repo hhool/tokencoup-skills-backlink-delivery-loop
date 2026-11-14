@@ -11,8 +11,9 @@ Mapping rules:
     competitor / reciprocal) is the CONSUMER's job, not the producer's.
   * `url` is copied verbatim as the site entry point. It is NOT a landing page;
     the consumer never uses it as link-ledger.target_url (see normalize.py).
-  * `is_gap` mirrors the prospector's own definition: not acquired and not a
-    competitor.
+  * `is_gap` is passed through when the upstream provides it, otherwise derived as
+    "not acquired and not a competitor". The store file carries no `is_gap`; the
+    CSV/UI export does, and that value must not be overwritten.
   * `source.content_hash` is the sha256 of the exact store file bytes, so a
     re-export after any store change yields a different hash and the consumer
     will re-validate.
@@ -52,8 +53,17 @@ def _coerce_int(value: Any, default: int) -> int:
     return default
 
 
-def export_snapshot(store_path: str | Path, repo: str = PROSPECTOR_REPO) -> Dict[str, Any]:
-    """Read a prospector store file and return a contract-C snapshot dict."""
+def export_snapshot(
+    store_path: str | Path,
+    repo: str = PROSPECTOR_REPO,
+    diagnostics: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Read a prospector store file and return a contract-C snapshot dict.
+
+    ``diagnostics``, when supplied, is filled with provenance that cannot live
+    inside the snapshot (the contract is closed): how many ``is_gap`` values were
+    passed through versus derived.
+    """
     src = Path(store_path)
     if not src.is_file():
         raise SnapshotError("Prospector store file not found", path=str(src))
@@ -75,6 +85,7 @@ def export_snapshot(store_path: str | Path, repo: str = PROSPECTOR_REPO) -> Dict
         raise SnapshotError("Prospector store is missing the domains map", path=str(src))
 
     prospects: List[Dict[str, Any]] = []
+    basis_counts: Dict[str, int] = {}
     for domain_key, record in domains.items():
         if not isinstance(record, dict):
             continue
@@ -94,7 +105,18 @@ def export_snapshot(store_path: str | Path, repo: str = PROSPECTOR_REPO) -> Dict
 
         acquired = bool(record.get("acquired"))
         is_competitor = bool(record.get("is_competitor"))
-        is_gap = (not acquired) and (not is_competitor)
+        # `is_gap` is passed through when the upstream carries it. The store file
+        # does not (checked against a live store: the key set has no is_gap), so a
+        # derived fallback is used there and flagged in `gap_basis`. The UI/CSV
+        # export does carry it, and that value encodes upstream judgements this
+        # tool cannot reproduce - a documentation page, or a competitor the flag
+        # misses. Recomputing it would resurrect those rows as actionable targets.
+        if isinstance(record.get("is_gap"), bool):
+            is_gap = record["is_gap"]
+            gap_basis = "upstream"
+        else:
+            is_gap = (not acquired) and (not is_competitor)
+            gap_basis = "derived"
 
         prospects.append({
             "domain": domain,
@@ -110,6 +132,11 @@ def export_snapshot(store_path: str | Path, repo: str = PROSPECTOR_REPO) -> Dict
             "first_seen": record.get("first_seen"),
             "last_seen": record.get("last_seen"),
         })
+        basis_counts[gap_basis] = basis_counts.get(gap_basis, 0) + 1
+
+    if diagnostics is not None:
+        diagnostics["is_gap_basis"] = dict(sorted(basis_counts.items()))
+        diagnostics["prospects"] = len(prospects)
 
     return {
         "center_domain": center,

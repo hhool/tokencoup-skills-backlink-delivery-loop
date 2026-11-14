@@ -56,5 +56,18 @@ def load_observations(path: Union[str, Path]) -> List[Dict[str, Any]]:
     return rows
 
 
+def load_observations_dir(path: Union[str, Path]) -> List[Dict[str, Any]]:
+    """Read every observation ledger under a directory (or a single file)."""
+    target = Path(path)
+    if target.is_file():
+        return load_observations(target)
+    if not target.is_dir():
+        return []
+    rows: List[Dict[str, Any]] = []
+    for candidate in sorted(target.rglob("*.jsonl")):
+        rows.extend(load_observations(candidate))
+    return rows
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")

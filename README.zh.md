@@ -72,10 +72,14 @@ python3 bin/delivery package --out dist
 |---|---|
 | `doctor` | 校验配置，打印路径与策略状态 |
 | `export-snapshot --store ... --out ...` | 契约 C 生产端：读 prospector store，产出带版本快照 |
+| `import-prospects --csv ... [--out ...] [--dry-run]` | 读 prospector 的 CSV 导出（信息更全，含 `is_gap`），报告映射并产出快照 |
 | `validate-snapshot --file ...` | 执行快照契约校验 |
 | `build-manifest --snapshot ... [--history ...] [--history-dir ...]` | 产出审阅清单 + 回执；每行内嵌渲染后的文案 |
 | `render-template --channel-type ... --context-json ...` | 预览某行将收到的出站文案 |
 | `lookup --target-domain ... [--history ...] [--history-dir ...]` | 对单个目标域名对账已记录的发送 |
+| `record --target-domain ... --channel form\|email --action ...` | 记录一次投递动作；append-only 且幂等 |
+| `status [--manifest ...] [--channel ...] [--target-domain ...]` | 把事件日志折叠为每个域名、每个渠道的当前状态 |
+| `forms list\|show\|register\|check` | 表单指纹注册表；首次遇到必须具名人工复核 |
 | `plan-window --submitted-at ...` | T+1/3/7/14/30 天排期 |
 | `classify --outcome ... --http-status ...` | 把一次观测判为 found/absent/unknown |
 | `observe --target-url ... --own-url ... [--record ...]` | 本地 L4 检测器（只读 GET） |
@@ -87,10 +91,42 @@ python3 bin/delivery package --out dist
 ### 配置（环境变量）
 
 `BDL_HOME`、`BDL_SNAPSHOT_DIR`、`BDL_PROSE_DIR`、`BDL_OUT_DIR`、`BDL_HISTORY_DIR`、
-`BDL_TEMPLATES_DIR`、`BDL_OBSERVATION_DIR`、`BDL_CENTER_DOMAIN`、`BDL_OWN_SITE_BASE`、
-`BDL_TIER`（`A`/`B`）、`BDL_AUTO_TRANSMIT`（必须为 `false`）、`BDL_AUTO_CONFIRM`
-（默认 `false`）、`BDL_DEFERRAL_WINDOW_DAYS`（默认 `90`）、`BDL_DAILY_CEILING`
-（默认 `100`）、`BDL_LOG_LEVEL`。完整列表见 `.env.example`。
+`BDL_TEMPLATES_DIR`、`BDL_OBSERVATION_DIR`、`BDL_RECORDS_DIR`、`BDL_FORMS_DIR`、
+`BDL_CENTER_DOMAIN`、`BDL_OWN_SITE_BASE`、`BDL_TIER`（`A`/`B`）、
+`BDL_AUTO_TRANSMIT`（必须为 `false`）、`BDL_AUTO_CONFIRM`（默认 `false`）、
+`BDL_DEFERRAL_WINDOW_DAYS`（默认 `90`）、`BDL_DAILY_CEILING`（默认 `100`）、
+`BDL_RECEIPT_WINDOW_DAYS`（默认 `30`）、`BDL_CONTACT_LOST_DAYS`（默认 `180`）、
+`BDL_LOG_LEVEL`。完整列表见 `.env.example`。
+
+### 投递渠道 ≠ 渠道类型
+
+`channel_type`（asset、guest_post、directory、community、journalist、other）决定文案；
+`channel`（`form`、`email`）决定怎么投，且是落点页的属性。同一域名可两者兼备，
+此时清单行 `channels: ["form", "email"]`，`status` 分两条独立跟踪。
+
+### 状态投影
+
+清单是照片，`status` 是胶片。`record` 为每个实际执行的动作追加一条事件，
+`status` 把这些事件折叠成每个 `(target_domain, channel)` 的当前状态：
+
+```
+record --target-domain mixkit.co --channel email --action sent \
+       --address hello@mixkit.co --provider-id msg_123
+record --target-domain mixkit.co --channel email --action bounced --address hello@mixkit.co
+status --manifest data/out/delivery-manifest.json
+```
+
+`sent` 必须带 provider id；`submitted` 必须带证据；`reply` 必须带分类。
+`pay` 与 `reciprocal` 会以 `compliance: refused`（R-510）入库，域名就此关闭而非议价。
+退信把**地址**放进 180 天冷却，但不关闭该域名的另一条渠道。30 天内没有回执记
+`unanswered_no_receipt`——是未知，不是失败，也不是重发的理由。
+
+### 表单指纹注册表
+
+表单由 `sha256(方法 + action 路径 + 排序后的字段名)` 识别，不看域名：同一站的
+「联系我们」与「提交资源」字段不同。未见过的指纹返回 `needs_human_verify`；
+`forms register` 强制 `--reviewed-by`，并保存字段映射、成功判据与验证码/登录门
+（存为 `manual_only`）。没有任何路径会自动注册表单，提交也仍需人工点。
 
 ### 模板
 
@@ -160,7 +196,7 @@ PYTHONPATH=$PWD python3 -m unittest discover -s tests -t . -v
 python3 -m compileall -q bdl bin tests
 ```
 
-共 77 项离线单测与 CLI 测试，覆盖 schema 拒绝、散文溯源、字段映射、节奏、观察窗、模板、历史对账、扫描/自动确认台账、发送闸门、打包与 CLI 输出。测试不联网，也不 mock 服务层。
+共 122 项离线单测与 CLI 测试，覆盖 schema 拒绝、CSV 导入映射、散文溯源、字段映射、节奏、观察窗、模板、历史对账、扫描/自动确认台账、事件幂等、状态投影与两个计时器、表单指纹、发送闸门、打包与 CLI 输出。测试不联网，也不 mock 服务层。
 
 ## 10. 分发
 
@@ -171,9 +207,9 @@ python3 -m compileall -q bdl bin tests
 - 表单提交与邮件发送（人工门，R-520 / R-530 tier B）。渲染出的文案只为审阅而生成，从不发送。
 - 写 `link-ledger.state`（单一人工写入器，R-512）。`scan --auto-confirm` 只在本地观察台账标 `live` 并排队提案。
 - 契约 C 的上游导出端（即 `backlink-prospector` 内部产出本包所消费快照的生产者）。
-- MX 解析与 provider 事件轮询（L2–L4 地址级别）。
-- 契约 C 的上游导出侧
-- MX 解析与 provider 事件轮询（地址 L2–L4 分级）
+- MX 解析与 provider 事件轮询（L2–L4 地址级别）。`record` 只接收人工或独立轮询器拿到的回执，自己不取。
+- 表单预填与自动提交。`forms register` 只存已复核的字段映射；填写与点提交仍是人工。
+- 回信解析。`record --action reply` 接收人工给出的分类；没有任何代码读邮箱。
 
 ## 12. 许可
 

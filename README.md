@@ -78,10 +78,14 @@ On the sample fixture the manifest reports 9 rows: 3 `ready_for_review`,
 |---|---|
 | `doctor` | Validate config, print paths and policy state |
 | `export-snapshot --store ... --out ...` | Contract-C producer: read a prospector store, emit a versioned snapshot |
+| `import-prospects --csv ... [--out ...] [--dry-run]` | Read a prospector CSV export (the richer surface: it carries `is_gap`), report the mapping, emit a snapshot |
 | `validate-snapshot --file ...` | Enforce the snapshot contract |
 | `build-manifest --snapshot ... [--history ...] [--history-dir ...]` | Produce the review artefact + receipt; embeds rendered copy per row |
 | `render-template --channel-type ... --context-json ...` | Preview outbound copy a row would receive |
 | `lookup --target-domain ... [--history ...] [--history-dir ...]` | Reconcile recorded sends for one target domain |
+| `record --target-domain ... --channel form\|email --action ...` | Record one delivery action; append-only and idempotent |
+| `status [--manifest ...] [--channel ...] [--target-domain ...]` | Fold the event log into a current state per domain and channel |
+| `forms list\|show\|register\|check` | Form fingerprint registry; a first-seen form needs a named human reviewer |
 | `plan-window --submitted-at ...` | T+1/3/7/14/30 day schedule |
 | `classify --outcome ... --http-status ...` | Map one observation to found/absent/unknown |
 | `observe --target-url ... --own-url ... [--record ...]` | Local L4 detector (read-only GET) |
@@ -95,10 +99,47 @@ a traceback.
 ### Configuration (env vars)
 
 `BDL_HOME`, `BDL_SNAPSHOT_DIR`, `BDL_PROSE_DIR`, `BDL_OUT_DIR`, `BDL_HISTORY_DIR`,
-`BDL_TEMPLATES_DIR`, `BDL_OBSERVATION_DIR`, `BDL_CENTER_DOMAIN`, `BDL_OWN_SITE_BASE`,
-`BDL_TIER` (`A`/`B`), `BDL_AUTO_TRANSMIT` (must stay `false`), `BDL_AUTO_CONFIRM`
-(default `false`), `BDL_DEFERRAL_WINDOW_DAYS` (default `90`), `BDL_DAILY_CEILING`
-(default `100`), `BDL_LOG_LEVEL`. See `.env.example` for the full list.
+`BDL_TEMPLATES_DIR`, `BDL_OBSERVATION_DIR`, `BDL_RECORDS_DIR`, `BDL_FORMS_DIR`,
+`BDL_CENTER_DOMAIN`, `BDL_OWN_SITE_BASE`, `BDL_TIER` (`A`/`B`), `BDL_AUTO_TRANSMIT`
+(must stay `false`), `BDL_AUTO_CONFIRM` (default `false`), `BDL_DEFERRAL_WINDOW_DAYS`
+(default `90`), `BDL_DAILY_CEILING` (default `100`), `BDL_RECEIPT_WINDOW_DAYS`
+(default `30`), `BDL_CONTACT_LOST_DAYS` (default `180`), `BDL_LOG_LEVEL`.
+See `.env.example` for the full list.
+
+### Delivery channel is not the same axis as channel type
+
+`channel_type` (asset, guest_post, directory, community, journalist, other) decides
+the copy. `channel` (`form`, `email`) decides how it is delivered, and it is a
+property of the landing page: one domain can offer both, in which case a manifest row
+carries `channels: ["form", "email"]` and `status` tracks the two separately.
+
+### Status projection
+
+Manifests are photographs; `status` is the film. `record` appends one event per
+action a human actually performed, and `status` folds those events into a current
+state per `(target_domain, channel)`:
+
+```
+record --target-domain mixkit.co --channel email --action sent \
+       --address hello@mixkit.co --provider-id msg_123
+record --target-domain mixkit.co --channel email --action bounced --address hello@mixkit.co
+status --manifest data/out/delivery-manifest.json
+```
+
+A `sent` needs a provider id; a `submitted` needs evidence; a `reply` needs a class.
+`pay` and `reciprocal` replies are stored with `compliance: refused` (R-510) so the
+domain is closed rather than negotiated. A bounce puts the *address* into a 180-day
+cooldown without closing the domain's other channel. No receipt inside 30 days is
+`unanswered_no_receipt` - unknown, never "failed", and never a reason to resend.
+
+### Form fingerprint registry
+
+A form is identified by `sha256(method + action path + sorted field names)`, not by
+domain: a site's contact form and its submission form have different fields. An
+unseen fingerprint returns `needs_human_verify`; `forms register` requires
+`--reviewed-by` and stores the field map, the success selector and any
+CAPTCHA/login gate (`manual_only`). Nothing auto-registers a form, and a human still
+clicks submit.
 
 ### Templates
 
@@ -172,9 +213,11 @@ PYTHONPATH=$PWD python3 -m unittest discover -s tests -t . -v
 python3 -m compileall -q bdl bin tests
 ```
 
-77 offline unit and CLI tests cover schema rejection, prose provenance, mapping,
-cadence, the observation window, templates, history reconciliation, the scan/auto-confirm
-ledger, the transmission gate, packaging and CLI output.
+122 offline unit and CLI tests cover schema rejection, CSV import mapping, prose
+provenance, field mapping, cadence, the observation window, templates, history
+reconciliation, the scan/auto-confirm ledger, event idempotency, the state
+projection and its two timers, form fingerprints, the transmission gate, packaging
+and CLI output.
 No test needs network access or mocks a service layer.
 
 ## 10. Distribution
@@ -191,7 +234,12 @@ the zip explicitly where the skill is needed; it is not auto-loaded.
   only marks the local observation ledger `live` and queues a proposal.
 - The upstream exporter side of contract C (the prospector store producer inside
   `backlink-prospector` that emits the snapshot this package consumes).
-- MX resolution and provider event polling (L2-L4 address levels).
+- MX resolution and provider event polling (L2-L4 address levels). `record` accepts
+  a receipt a human or a separate poller obtained; it does not fetch one.
+- Form prefill and submission. `forms register` stores a verified field map; the
+  act of filling and clicking submit stays human.
+- Inbound reply parsing. `record --action reply` takes the classification a human
+  made; nothing reads a mailbox.
 
 ## 12. Licence
 

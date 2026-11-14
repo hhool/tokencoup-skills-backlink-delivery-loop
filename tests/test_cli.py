@@ -117,6 +117,124 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("{{", payload["content"]["email"]["subject"])
         self.assertIn("x.com", payload["content"]["email"]["subject"])
 
+    def _workspace(self, tmp: str) -> dict:
+        return {
+            "BDL_HOME": tmp,
+            "BDL_CENTER_DOMAIN": "soundbuttons.cc",
+            "BDL_AUTO_TRANSMIT": "false",
+            "BDL_RECORDS_DIR": str(Path(tmp) / "records"),
+            "BDL_OBSERVATION_DIR": str(Path(tmp) / "obs"),
+            "BDL_FORMS_DIR": str(Path(tmp) / "forms"),
+            "BDL_OUT_DIR": str(Path(tmp) / "out"),
+        }
+
+    def test_import_prospects_dry_run_reports_mapping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "backlink-prospects-soundbuttons.cc-20261114T181442Z.csv"
+            csv_path.write_bytes((
+                "\ufeffurl,domain,type_key,priority,valid,http_status,is_gap,"
+                "is_competitor,already_have,authority_tier\n"
+                "https://a.com,a.com,resource,70,True,200,True,False,False,Medium\n"
+                "https://b.com,b.com,resource,60,True,200,False,False,False,Medium\n"
+            ).encode("utf-8"))
+            code, payload, _ = self._run(
+                ["import-prospects", "--csv", str(csv_path), "--dry-run"],
+                self._workspace(tmp),
+            )
+            self.assertEqual(code, 0)
+            self.assertTrue(payload["dry_run"])
+            self.assertEqual(payload["prospects"], 2)
+            self.assertEqual(payload["center_domain"], "soundbuttons.cc")
+            self.assertIn("authority_tier", payload["mapping"]["dropped_columns"])
+
+    def test_import_prospects_writes_a_valid_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "prospects.csv"
+            csv_path.write_bytes((
+                "\ufeffurl,domain,type_key,priority,valid,http_status,is_gap,"
+                "is_competitor,already_have\n"
+                "https://a.com,a.com,resource,70,True,200,True,False,False\n"
+            ).encode("utf-8"))
+            out = Path(tmp) / "snap.json"
+            code, payload, _ = self._run(
+                ["import-prospects", "--csv", str(csv_path),
+                 "--center-domain", "soundbuttons.cc", "--out", str(out)],
+                self._workspace(tmp),
+            )
+            self.assertEqual(code, 0)
+            code, validated, _ = self._run(
+                ["validate-snapshot", "--file", str(out), "--center-domain", "soundbuttons.cc"],
+                self._workspace(tmp),
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(validated["prospects"], 1)
+
+    def test_record_then_status_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self._workspace(tmp)
+            code, payload, _ = self._run(
+                ["record", "--target-domain", "mixkit.co", "--channel", "email",
+                 "--action", "sent", "--address", "e@mixkit.co",
+                 "--provider-id", "msg_1", "--at", "2026-11-01T09:00:00Z"],
+                env,
+            )
+            self.assertEqual(code, 0)
+            self.assertTrue(payload["appended"])
+            self.assertEqual(payload["state"]["state"], "sent")
+
+            code, duplicate, _ = self._run(
+                ["record", "--target-domain", "mixkit.co", "--channel", "email",
+                 "--action", "sent", "--address", "e@mixkit.co",
+                 "--provider-id", "msg_1", "--at", "2026-11-01T09:00:00Z"],
+                env,
+            )
+            self.assertEqual(code, 0)
+            self.assertFalse(duplicate["appended"])
+            self.assertTrue(duplicate["duplicate"])
+
+            code, status, _ = self._run(["status"], env)
+            self.assertEqual(code, 0)
+            self.assertEqual(status["summary"]["channels"], 1)
+            self.assertEqual(status["rows"][0]["state"], "sent")
+
+    def test_record_rejects_a_send_without_provider_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, _, stderr = self._run(
+                ["record", "--target-domain", "a.com", "--channel", "email",
+                 "--action", "sent", "--address", "e@a.com"],
+                self._workspace(tmp),
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("provider id", stderr)
+
+    def test_forms_register_then_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self._workspace(tmp)
+            code, payload, _ = self._run(
+                ["forms", "check", "--action", "https://mixkit.co/submit",
+                 "--fields", "name,email,message"],
+                env,
+            )
+            self.assertEqual(code, 0)
+            self.assertFalse(payload["known"])
+
+            code, registered, _ = self._run(
+                ["forms", "register", "--domain", "mixkit.co",
+                 "--action", "https://mixkit.co/submit", "--fields", "name,email,message",
+                 "--map", "name=soundbuttons.cc", "--reviewed-by", "hou"],
+                env,
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(registered["entry"]["status"], "verified")
+
+            code, known, _ = self._run(
+                ["forms", "check", "--action", "https://mixkit.co/submit",
+                 "--fields", "message,name,email"],
+                env,
+            )
+            self.assertEqual(code, 0)
+            self.assertTrue(known["known"])
+
 
 if __name__ == "__main__":
     unittest.main()

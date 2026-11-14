@@ -14,8 +14,8 @@ from typing import Dict, List, Optional, Tuple
 from .. import CONTRACTS_VERSION
 from ..errors import PolicyError
 from ..models import (
-    ManifestRow, ProseContact, Prospect, Snapshot, absolute_url, domain_from_text,
-    normalize_domain,
+    ManifestRow, ProseContact, Prospect, Snapshot, absolute_url, delivery_channels,
+    domain_from_text, normalize_domain,
 )
 from . import cadence
 
@@ -93,6 +93,13 @@ def build_rows(
             status = "blocked"
         if prospect.acquired:
             reasons.append("already acquired upstream")
+            status = "blocked"
+        if not prospect.is_gap:
+            # The upstream may know things this tool cannot reproduce: that a URL
+            # is a documentation or support page rather than a placement surface,
+            # or that a domain is a competitor under a name the flags miss.
+            # `is_gap=false` is that judgement, and it must not be dropped.
+            reasons.append("upstream marked this domain as not an actionable gap")
             status = "blocked"
         if prospect.type_key in EXCLUDED_TYPES:
             reasons.append("type is excluded by white-hat policy")
@@ -184,6 +191,7 @@ def build_rows(
                     snapshot.center_domain, domain, channel_type, target_url or ""
                 ),
                 content=content,
+                channels=delivery_channels(submission_url, contact_email),
             )
         )
     return rows
