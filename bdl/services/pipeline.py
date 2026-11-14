@@ -11,12 +11,13 @@ from pathlib import Path
 from typing import Optional
 
 from .. import CONTRACTS_VERSION, __version__
-from ..adapters.outbox import append_receipt, read_history, write_manifest
+from ..adapters.outbox import append_receipt, collect_history, write_manifest
 from ..adapters.prose import load_prose_contacts
 from ..adapters.snapshot import load_snapshot
 from ..config import Config
 from ..log import JsonLogger
 from ..models import as_dict, normalize_domain
+from ..templates import TemplateSet
 from .normalize import build_rows
 
 
@@ -24,7 +25,7 @@ def build_manifest(
     cfg: Config,
     snapshot_path: str,
     prose_dir: str,
-    history_path: str,
+    history_sources: list,
     out_dir: str,
     batch_id: str,
     logger: JsonLogger,
@@ -33,13 +34,23 @@ def build_manifest(
     moment = now or datetime.now(timezone.utc)
     snapshot = load_snapshot(snapshot_path, cfg.center_domain)
     contacts = load_prose_contacts(prose_dir)
-    history = read_history(history_path)
+    history = collect_history(history_sources)
     live_domains = {
         normalize_domain(str(row.get("target_domain", "")))
         for row in history
         if row.get("state") in {"live", "indexed"}
     }
-    rows = build_rows(snapshot, contacts, cfg.own_site_base, live_domains, history, moment)
+    templates = TemplateSet.load(cfg.templates_dir, cfg.center_domain)
+    rows = build_rows(
+        snapshot,
+        contacts,
+        cfg.own_site_base,
+        live_domains,
+        history,
+        moment,
+        deferral_days=cfg.deferral_window_days,
+        templates=templates,
+    )
     counts = Counter(row.status for row in rows)
 
     gaps: list = []
@@ -56,7 +67,10 @@ def build_manifest(
         "policy": {
             "tier": cfg.tier,
             "auto_transmit": False,
+            "auto_confirm": cfg.auto_confirm,
             "human_review_required": True,
+            "deferral_window_days": cfg.deferral_window_days,
+            "daily_ceiling": cfg.daily_ceiling,
             "rule_refs": ["R-510", "R-512", "R-520", "R-522", "R-530"],
             "note": "Manifest is a review artefact. No message was sent and no form was submitted.",
         },
@@ -64,6 +78,7 @@ def build_manifest(
             "total": len(rows),
             "by_status": dict(sorted(counts.items())),
             "prose_contacts": len(contacts),
+            "history_events": len(history),
             "snapshot_file_hash": snapshot.file_hash,
             "tool_version": __version__,
         },
@@ -83,6 +98,7 @@ def build_manifest(
             "row_count": len(rows),
             "snapshot_file_hash": snapshot.file_hash,
             "auto_transmit": False,
+            "auto_confirm": cfg.auto_confirm,
         },
     )
     logger.emit(

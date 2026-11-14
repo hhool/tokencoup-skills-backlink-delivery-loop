@@ -2,16 +2,30 @@
 
 Nothing in this module transmits data. It writes local artefacts for a human to
 review, and an evidence trail that can be replayed.
+
+History is a derived, replayable record. A single `build-manifest` run may draw
+on several sources (a primary JSON file, a directory of dated JSONL files, or a
+glob) - `collect_history` aggregates them all behind one interface.
 """
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Sequence, Union
 
 from ..errors import WriteError
+
+
+def _decode_history(payload: Any) -> List[dict]:
+    if isinstance(payload, dict):
+        rows = payload.get("rows")
+        return rows if isinstance(rows, list) else []
+    if isinstance(payload, list):
+        return payload
+    return []
 
 _MANIFEST_KEYS = {
     "center_domain", "batch_id", "generated_at", "schema_version",
@@ -60,4 +74,61 @@ def read_history(path: str | Path) -> list:
         payload = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
-    return payload.get("rows", []) if isinstance(payload, dict) else []
+    return _decode_history(payload)
+
+
+def collect_history(sources: Sequence[Union[str, Path]]) -> List[dict]:
+    """Aggregate rows from many history sources.
+
+    Each source may be:
+      * a JSON file with ``{"rows": [...]}`` or a bare list;
+      * a directory - every ``*.json``/``*.jsonl`` file inside is read;
+      * a glob pattern - every matching file is read.
+
+    Missing or unreadable sources are silently ignored (history is a soft
+    signal; an absent log must never abort planning).
+    """
+    rows: List[dict] = []
+    for raw in sources or []:
+        candidate = Path(raw)
+        paths: List[Path] = []
+        if candidate.is_dir():
+            paths = sorted(candidate.rglob("*.json")) + sorted(candidate.rglob("*.jsonl"))
+        elif candidate.exists():
+            paths = [candidate]
+        else:
+            paths = [Path(p) for p in sorted(glob.glob(str(raw)))]
+        for target in paths:
+            if not target.is_file():
+                continue
+            text = ""
+            try:
+                text = target.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                # a .jsonl file: one object per line
+                for line in text.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rows.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+                continue
+            rows.extend(_decode_history(payload))
+    return rows
+
+
+def lookup_history(domain: str, sources: Sequence[Union[str, Path]]) -> List[dict]:
+    """Return every send/observe event recorded for one target domain."""
+    from ..models import normalize_domain
+
+    target = normalize_domain(domain)
+    if not target:
+        return []
+    rows = collect_history(sources)
+    return [row for row in rows if normalize_domain(str(row.get("target_domain", ""))) == target]

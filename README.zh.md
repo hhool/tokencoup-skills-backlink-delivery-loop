@@ -71,13 +71,37 @@ python3 bin/delivery package --out dist
 | 命令 | 用途 |
 |---|---|
 | `doctor` | 校验配置，打印路径与策略状态 |
+| `export-snapshot --store ... --out ...` | 契约 C 生产端：读 prospector store，产出带版本快照 |
 | `validate-snapshot --file ...` | 执行快照契约校验 |
-| `build-manifest --snapshot ... --history ...` | 产出审阅清单 + 回执 |
+| `build-manifest --snapshot ... [--history ...] [--history-dir ...]` | 产出审阅清单 + 回执；每行内嵌渲染后的文案 |
+| `render-template --channel-type ... --context-json ...` | 预览某行将收到的出站文案 |
+| `lookup --target-domain ... [--history ...] [--history-dir ...]` | 对单个目标域名对账已记录的发送 |
 | `plan-window --submitted-at ...` | T+1/3/7/14/30 天排期 |
 | `classify --outcome ... --http-status ...` | 把一次观测判为 found/absent/unknown |
+| `observe --target-url ... --own-url ... [--record ...]` | 本地 L4 检测器（只读 GET） |
+| `scan --manifest ... [--auto-confirm] [--out ...]` | 自动扫描目标页、记录观测、可选排队确认提案 |
 | `package --out ...` | 生成 `dist/backlink-delivery-loop.zip` |
 
 所有命令向 stdout 输出结构化 JSON；日志是 stderr 上带 `batch_id` 的结构化 JSON；错误是规范化 JSON（含 `code`），不暴露堆栈。
+
+### 配置（环境变量）
+
+`BDL_HOME`、`BDL_SNAPSHOT_DIR`、`BDL_PROSE_DIR`、`BDL_OUT_DIR`、`BDL_HISTORY_DIR`、
+`BDL_TEMPLATES_DIR`、`BDL_OBSERVATION_DIR`、`BDL_CENTER_DOMAIN`、`BDL_OWN_SITE_BASE`、
+`BDL_TIER`（`A`/`B`）、`BDL_AUTO_TRANSMIT`（必须为 `false`）、`BDL_AUTO_CONFIRM`
+（默认 `false`）、`BDL_DEFERRAL_WINDOW_DAYS`（默认 `90`）、`BDL_DAILY_CEILING`
+（默认 `100`）、`BDL_LOG_LEVEL`。完整列表见 `.env.example`。
+
+### 模板
+
+内置了每个 `channel_type` 的文案。通过 `BDL_TEMPLATES_DIR` 覆盖任意渠道：
+`templates.json` 覆盖所有中心，`<center_domain>.json` 只覆盖一个。见
+`assets/templates.example.json`。渲染拒绝未定义的占位符与邮件文案中的汉字（R-522）。
+
+### 自动确认
+
+`scan --auto-confirm`（或 `BDL_AUTO_CONFIRM=true`）把命中的链接在本地台账标 `live`，
+并排队确认提案。它不写共享的 link-ledger——把共享状态标 `live` 仍是独立的、需人工确认的 SEXTANT 步骤。
 
 ## 6. 产物
 
@@ -136,7 +160,7 @@ PYTHONPATH=$PWD python3 -m unittest discover -s tests -t . -v
 python3 -m compileall -q bdl bin tests
 ```
 
-共 39 项离线单测与 CLI 测试，覆盖 schema 拒绝、散文溯源、字段映射、节奏、观察窗、发送闸门、打包与 CLI 输出。测试不联网，也不 mock 服务层。
+共 77 项离线单测与 CLI 测试，覆盖 schema 拒绝、散文溯源、字段映射、节奏、观察窗、模板、历史对账、扫描/自动确认台账、发送闸门、打包与 CLI 输出。测试不联网，也不 mock 服务层。
 
 ## 10. 分发
 
@@ -144,9 +168,10 @@ python3 -m compileall -q bdl bin tests
 
 ## 11. 刻意未实现
 
-- 表单提交与邮件发送（人工门，R-520 / R-530 tier B）
-- 抓取 `target_url` 判定 L4（需规则承载的观察 worker）
-- 写 `link-ledger.state`（单一人工写入器，R-512）
+- 表单提交与邮件发送（人工门，R-520 / R-530 tier B）。渲染出的文案只为审阅而生成，从不发送。
+- 写 `link-ledger.state`（单一人工写入器，R-512）。`scan --auto-confirm` 只在本地观察台账标 `live` 并排队提案。
+- 契约 C 的上游导出端（即 `backlink-prospector` 内部产出本包所消费快照的生产者）。
+- MX 解析与 provider 事件轮询（L2–L4 地址级别）。
 - 契约 C 的上游导出侧
 - MX 解析与 provider 事件轮询（地址 L2–L4 分级）
 

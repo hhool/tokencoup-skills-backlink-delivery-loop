@@ -77,15 +77,41 @@ On the sample fixture the manifest reports 9 rows: 3 `ready_for_review`,
 | Command | Purpose |
 |---|---|
 | `doctor` | Validate config, print paths and policy state |
+| `export-snapshot --store ... --out ...` | Contract-C producer: read a prospector store, emit a versioned snapshot |
 | `validate-snapshot --file ...` | Enforce the snapshot contract |
-| `build-manifest --snapshot ... --history ...` | Produce the review artefact + receipt |
+| `build-manifest --snapshot ... [--history ...] [--history-dir ...]` | Produce the review artefact + receipt; embeds rendered copy per row |
+| `render-template --channel-type ... --context-json ...` | Preview outbound copy a row would receive |
+| `lookup --target-domain ... [--history ...] [--history-dir ...]` | Reconcile recorded sends for one target domain |
 | `plan-window --submitted-at ...` | T+1/3/7/14/30 day schedule |
 | `classify --outcome ... --http-status ...` | Map one observation to found/absent/unknown |
+| `observe --target-url ... --own-url ... [--record ...]` | Local L4 detector (read-only GET) |
+| `scan --manifest ... [--auto-confirm] [--out ...]` | Auto-scan target pages, record observations, optionally queue confirm proposals |
 | `package --out ...` | Build `dist/backlink-delivery-loop.zip` |
 
 All commands print structured JSON to stdout. Logs are structured JSON on stderr
 with a `batch_id`; errors are normalised JSON with an error `code` and never expose
 a traceback.
+
+### Configuration (env vars)
+
+`BDL_HOME`, `BDL_SNAPSHOT_DIR`, `BDL_PROSE_DIR`, `BDL_OUT_DIR`, `BDL_HISTORY_DIR`,
+`BDL_TEMPLATES_DIR`, `BDL_OBSERVATION_DIR`, `BDL_CENTER_DOMAIN`, `BDL_OWN_SITE_BASE`,
+`BDL_TIER` (`A`/`B`), `BDL_AUTO_TRANSMIT` (must stay `false`), `BDL_AUTO_CONFIRM`
+(default `false`), `BDL_DEFERRAL_WINDOW_DAYS` (default `90`), `BDL_DAILY_CEILING`
+(default `100`), `BDL_LOG_LEVEL`. See `.env.example` for the full list.
+
+### Templates
+
+Built-in copy for every `channel_type` ships with the package. Override any channel
+via `BDL_TEMPLATES_DIR`: `templates.json` overrides all centres, `<center_domain>.json`
+overrides one. See `assets/templates.example.json`. Rendering rejects undefined
+placeholders and CJK in email copy (R-522).
+
+### Auto-confirm
+
+`scan --auto-confirm` (or `BDL_AUTO_CONFIRM=true`) marks a `found` link `live` in the
+local observation ledger and queues a confirm proposal. It never writes the shared
+link-ledger - promoting the shared state is a separate, human-confirmed SEXTANT step.
 
 ## 6. Outputs
 
@@ -146,8 +172,9 @@ PYTHONPATH=$PWD python3 -m unittest discover -s tests -t . -v
 python3 -m compileall -q bdl bin tests
 ```
 
-39 offline unit and CLI tests cover schema rejection, prose provenance, mapping,
-cadence, the observation window, the transmission gate, packaging and CLI output.
+77 offline unit and CLI tests cover schema rejection, prose provenance, mapping,
+cadence, the observation window, templates, history reconciliation, the scan/auto-confirm
+ledger, the transmission gate, packaging and CLI output.
 No test needs network access or mocks a service layer.
 
 ## 10. Distribution
@@ -158,10 +185,12 @@ the zip explicitly where the skill is needed; it is not auto-loaded.
 
 ## 11. Not implemented (by design)
 
-- Form submission and mail transmission (human gate, R-520 / R-530 tier B).
-- Fetching `target_url` for L4 (needs a rule-backed observation worker).
-- Writing `link-ledger.state` (single human writer, R-512).
-- The upstream exporter side of contract C.
+- Form submission and mail transmission (human gate, R-520 / R-530 tier B). The
+  rendered copy is produced for review but never sent.
+- Writing `link-ledger.state` (single human writer, R-512). `scan --auto-confirm`
+  only marks the local observation ledger `live` and queues a proposal.
+- The upstream exporter side of contract C (the prospector store producer inside
+  `backlink-prospector` that emits the snapshot this package consumes).
 - MX resolution and provider event polling (L2-L4 address levels).
 
 ## 12. Licence

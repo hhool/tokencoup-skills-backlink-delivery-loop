@@ -95,6 +95,7 @@ class ManifestRow:
     reasons: List[str] = field(default_factory=list)
     gaps: List[str] = field(default_factory=list)
     idempotency_key: str = ""
+    content: Optional[dict] = None
 
 
 def absolute_url(value: str, base: str) -> Optional[str]:

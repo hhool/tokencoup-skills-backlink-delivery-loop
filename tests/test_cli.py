@@ -83,6 +83,40 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(payload["outcome"], "unknown")
 
+    def test_lookup_reconciles_history(self):
+        code, payload, _ = self._run(
+            ["lookup", "--target-domain", "defer-example.com", "--history", str(HISTORY)],
+            {"BDL_AUTO_TRANSMIT": "false"},
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["events"][0]["target_domain"], "defer-example.com")
+
+    def test_package_command_reports_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "SKILL.md").write_text("# package fixture", encoding="utf-8")
+            Path(tmp, "extra.txt").write_text("payload", encoding="utf-8")
+            code, payload, _ = self._run(
+                ["package", "--out", str(Path(tmp) / "dist")],
+                {"BDL_HOME": tmp, "BDL_AUTO_TRANSMIT": "false"},
+            )
+            self.assertEqual(code, 0)
+            self.assertGreater(payload["bytes"], 0)
+            self.assertTrue(Path(payload["archive"]).is_file())
+
+    def test_render_template_preview(self):
+        code, payload, _ = self._run(
+            ["render-template", "--channel-type", "asset", "--context-json",
+             json.dumps({"target_domain": "x.com", "center_domain": "c.com",
+                         "own_site_base": "https://c.com", "own_url": "https://c.com/p",
+                         "candidate_url": "https://x.com", "target_url": "https://x.com",
+                         "submission_url": "https://x.com/s", "contact_email": "e@x.com"})],
+            {"BDL_AUTO_TRANSMIT": "false"},
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("{{", payload["content"]["email"]["subject"])
+        self.assertIn("x.com", payload["content"]["email"]["subject"])
+
 
 if __name__ == "__main__":
     unittest.main()

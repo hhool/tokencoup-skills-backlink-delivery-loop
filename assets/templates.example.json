@@ -1,0 +1,21 @@
+{
+  "asset": {
+    "email": {
+      "subject": "Resource list addition for {{ target_domain }}",
+      "body": "Hello,\n\nI run {{ center_domain }} and built a guide that fits the resource list on {{ target_domain }}: {{ own_url }}\n\nIf it is a fit, a mention would mean a lot. Thank you.\n\n{{ center_domain }}"
+    },
+    "form": {
+      "fields": {
+        "website": "{{ target_domain }}",
+        "resource_url": "{{ own_url }}",
+        "comment": "Suggested resource: {{ own_url }}"
+      }
+    }
+  },
+  "guest_post": {
+    "email": {
+      "subject": "Guest article proposal for {{ target_domain }}",
+      "body": "Hi {{ target_domain }} team,\n\nI would like to contribute a guest post to {{ target_domain }}. I publish {{ center_domain }} ({{ own_site_base }}) and can supply an original article linking to {{ own_url }}.\n\nBest,\n{{ center_domain }}"
+    }
+  }
+}

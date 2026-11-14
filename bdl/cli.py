@@ -16,6 +16,7 @@ from .errors import DeliveryError
 from .log import JsonLogger, new_batch_id
 from .services import window
 from .services.pipeline import build_manifest
+from .templates import CHANNEL_TYPES, TemplateSet
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -35,9 +36,26 @@ def _parser() -> argparse.ArgumentParser:
     build = sub.add_parser("build-manifest", help="Build a review-only delivery manifest")
     build.add_argument("--snapshot", required=True)
     build.add_argument("--prose-dir", default="")
-    build.add_argument("--history", default="")
+    build.add_argument("--history", default="", help="Primary history file (JSON or JSONL)")
+    build.add_argument("--history-dir", default="", help="Directory of additional history files")
     build.add_argument("--out", default="")
     build.add_argument("--center-domain", default="")
+
+    lookup = sub.add_parser("lookup", help="Reconcile recorded sends for one target domain")
+    lookup.add_argument("--target-domain", required=True)
+    lookup.add_argument("--history", default="", help="History file (JSON or JSONL)")
+    lookup.add_argument("--history-dir", default="")
+
+    render = sub.add_parser("render-template", help="Preview rendered outbound copy for a channel")
+    render.add_argument("--channel-type", required=True, choices=list(CHANNEL_TYPES))
+    render.add_argument("--templates-dir", default="", help="Override templates directory")
+    render.add_argument("--context-json", default="", help="JSON object of template variables")
+
+    scan = sub.add_parser("scan", help="Fetch target pages and observe live backlinks (L4, read-only)")
+    scan.add_argument("--manifest", required=True, help="A delivery-manifest.json produced earlier")
+    scan.add_argument("--out", default="", help="Directory for the observation ledger and proposals")
+    scan.add_argument("--auto-confirm", action="store_true",
+                      help="Mark found links live locally and queue confirm proposals")
 
     plan = sub.add_parser("plan-window", help="Compute the submitted-to-live observation schedule")
     plan.add_argument("--submitted-at", required=True)
@@ -71,6 +89,25 @@ def _parser() -> argparse.ArgumentParser:
 
 def _output(payload: dict) -> None:
     sys.stdout.write(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+
+def _history_sources(args: argparse.Namespace, cfg: Config) -> list:
+    """Build the ordered list of history sources for one run.
+
+    Order: explicit ``--history`` file, the default per-run file under the out
+    directory, then ``--history-dir`` and the configured ``BDL_HISTORY_DIR``.
+    ``collect_history`` silently skips anything missing.
+    """
+    sources: list = []
+    explicit = getattr(args, "history", "")
+    if explicit:
+        sources.append(explicit)
+    default_file = cfg.out_dir / "send-history.json"
+    sources.append(str(default_file))
+    for directory in (getattr(args, "history_dir", ""), str(cfg.history_dir)):
+        if directory:
+            sources.append(directory)
+    return sources
 
 
 def _run(args: argparse.Namespace) -> dict:
@@ -112,16 +149,68 @@ def _run(args: argparse.Namespace) -> dict:
         effective = replace(cfg, center_domain=center)
         if not cfg.own_site_base:
             effective = replace(effective, own_site_base="https://" + center)
+        history_sources = _history_sources(args, effective)
         manifest = build_manifest(
             cfg=effective,
             snapshot_path=args.snapshot,
             prose_dir=args.prose_dir or str(cfg.prose_dir),
-            history_path=args.history or str(cfg.out_dir / "send-history.json"),
+            history_sources=history_sources,
             out_dir=args.out or str(cfg.out_dir),
             batch_id=args.batch_id or new_batch_id(),
             logger=logger,
         )
         return {"ok": True, "batch_id": manifest["batch_id"], "summary": manifest["summary"], "gaps": manifest["gaps"]}
+
+    if args.command == "lookup":
+        from .adapters.outbox import lookup_history
+
+        sources = _history_sources(args, cfg)
+        events = lookup_history(args.target_domain, sources)
+        return {
+            "ok": True,
+            "target_domain": args.target_domain,
+            "center_domain": cfg.center_domain,
+            "events": events,
+            "count": len(events),
+            "note": "History is a derived, replayable record; absence is a gap, not a zero.",
+        }
+
+    if args.command == "render-template":
+        directory = args.templates_dir or str(cfg.templates_dir)
+        template_set = TemplateSet.load(directory, cfg.center_domain)
+        context = json.loads(args.context_json) if args.context_json else {}
+        rendered = template_set.render(args.channel_type, context)
+        return {"ok": True, "channel_type": args.channel_type, "templates_dir": directory, "content": rendered}
+
+    if args.command == "scan":
+        from .models import ManifestRow
+        from .services.observe import default_fetcher
+        from .services.scan import scan_rows
+
+        manifest_path = Path(args.manifest)
+        if not manifest_path.is_file():
+            raise DeliveryError("Manifest not found", path=str(manifest_path))
+        manifest_doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+        rows = [ManifestRow(**row) for row in manifest_doc.get("rows", [])]
+        out_dir = Path(args.out or str(cfg.observation_dir))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        auto_confirm = bool(args.auto_confirm) or cfg.auto_confirm
+        result = scan_rows(
+            rows=rows,
+            fetcher=default_fetcher(),
+            auto_confirm=auto_confirm,
+            center_domain=manifest_doc.get("center_domain", cfg.center_domain),
+            observation_path=str(out_dir / "observations.jsonl"),
+            proposal_path=str(out_dir / "confirm-proposals.jsonl"),
+        )
+        logger.emit(
+            "scan_completed",
+            scanned=result["scanned"],
+            found=result["found"],
+            confirmed=result["confirmed"],
+        )
+        return {"ok": True, **{k: v for k, v in result.items() if k != "proposals"},
+                "proposals_count": len(result["proposals"])}
 
     if args.command == "plan-window":
         schedule = window.plan(args.submitted_at, args.max_checks)
@@ -138,7 +227,7 @@ def _run(args: argparse.Namespace) -> dict:
         from .package import build_package
         candidate = cfg.home if (cfg.home / "SKILL.md").is_file() else Path(__file__).resolve().parents[1]
         archive = build_package(candidate, args.out or None)
-        return {"ok": True, "archive": str(archive), "bytes": archive.stat().size}
+        return {"ok": True, "archive": str(archive), "bytes": archive.stat().st_size}
 
     if args.command == "classify":
         return {

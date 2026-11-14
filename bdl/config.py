@@ -34,12 +34,16 @@ class Config:
     snapshot_dir: Path
     prose_dir: Path
     out_dir: Path
+    history_dir: Path
+    templates_dir: Path
+    observation_dir: Path
     center_domain: str
     own_site_base: str
     tier: str
     auto_transmit: bool
+    auto_confirm: bool
     log_level: str
-    repeat_window_days: int = 90
+    deferral_window_days: int = 90
     daily_ceiling: int = 100
 
     @classmethod
@@ -59,9 +63,18 @@ class Config:
                 rule="R-520/R-530",
             )
 
+        auto_confirm = _as_bool(source.get("BDL_AUTO_CONFIRM", "false"), "BDL_AUTO_CONFIRM")
+
         level = source.get("BDL_LOG_LEVEL", "INFO").strip().upper()
         if level not in _LEVELS:
             raise ConfigError("Unsupported log level", env="BDL_LOG_LEVEL", value=level)
+
+        deferral = int(source.get("BDL_DEFERRAL_WINDOW_DAYS", "90")) if source.get("BDL_DEFERRAL_WINDOW_DAYS") else 90
+        if deferral < 0:
+            raise ConfigError("Deferral window must be non-negative", env="BDL_DEFERRAL_WINDOW_DAYS", value=str(deferral))
+        ceiling = int(source.get("BDL_DAILY_CEILING", "100")) if source.get("BDL_DAILY_CEILING") else 100
+        if ceiling < 1:
+            raise ConfigError("Daily ceiling must be positive", env="BDL_DAILY_CEILING", value=str(ceiling))
 
         center = source.get("BDL_CENTER_DOMAIN", "").strip().lower()
         base = source.get("BDL_OWN_SITE_BASE", "").strip().rstrip("/")
@@ -73,9 +86,15 @@ class Config:
             snapshot_dir=_path(home, "BDL_SNAPSHOT_DIR", "data/snapshots", source),
             prose_dir=_path(home, "BDL_PROSE_DIR", "data/prose", source),
             out_dir=_path(home, "BDL_OUT_DIR", "data/out", source),
+            history_dir=_path(home, "BDL_HISTORY_DIR", "data/history", source),
+            templates_dir=_path(home, "BDL_TEMPLATES_DIR", "data/templates", source),
+            observation_dir=_path(home, "BDL_OBSERVATION_DIR", "data/observations", source),
             center_domain=center,
             own_site_base=base,
             tier=tier,
             auto_transmit=auto,
+            auto_confirm=auto_confirm,
             log_level=level,
+            deferral_window_days=deferral,
+            daily_ceiling=ceiling,
         )

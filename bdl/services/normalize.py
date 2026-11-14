@@ -76,6 +76,8 @@ def build_rows(
     live_domains: set,
     history: List[dict],
     now: datetime,
+    deferral_days: int = 90,
+    templates=None,
 ) -> List[ManifestRow]:
     indexed = index_contacts(contacts)
     rows: List[ManifestRow] = []
@@ -102,7 +104,7 @@ def build_rows(
             reasons.append("link-ledger already has a live link for this domain")
             status = "blocked"
 
-        opened, window_reason = cadence.window_open(domain, history, now)
+        opened, window_reason = cadence.window_open(domain, history, now, days=deferral_days)
         if not opened and status != "blocked":
             reasons.append(window_reason)
             status = "deferred"
@@ -142,6 +144,26 @@ def build_rows(
                 status = "needs_enrichment"
 
         channel_type = TYPE_MAP.get(prospect.type_key, "other")
+
+        content = None
+        if templates and (submission_url or contact_email) and target_url and own_url:
+            context = {
+                "center_domain": snapshot.center_domain,
+                "own_site_base": own_site_base,
+                "own_url": own_url or "",
+                "target_domain": domain,
+                "candidate_url": prospect.url,
+                "target_url": target_url or "",
+                "submission_url": submission_url or "",
+                "contact_email": contact_email or "",
+            }
+            try:
+                content = templates.render(channel_type, context)
+            except PolicyError as exc:
+                reasons.append("template render blocked: %s" % exc.to_dict().get("reason", "policy"))
+                if status not in {"blocked", "deferred"}:
+                    status = "needs_enrichment"
+
         rows.append(
             ManifestRow(
                 prospect_id="%s#%s" % (domain, channel_type),
@@ -161,6 +183,7 @@ def build_rows(
                 idempotency_key=_idempotency_key(
                     snapshot.center_domain, domain, channel_type, target_url or ""
                 ),
+                content=content,
             )
         )
     return rows
