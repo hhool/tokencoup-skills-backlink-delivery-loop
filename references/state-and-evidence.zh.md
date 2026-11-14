@@ -96,4 +96,6 @@ link-ledger.state      registered → submitted → approved → live → indexe
 - `delivery_delayed` / `queued` / `softbounce` → `pending`，不落事件。仍在途中不是结论。
 - 401、403、404、429、5xx、超时、非 JSON 响应体、无法识别的状态词 → `unknown`，不落事件。这与 L4 观测器是同一种不对称：拒绝不等于缺席。因为 API 返回 429 就把一个活邮箱关 180 天，是这种错误的昂贵版本。
 
+一个很容易踩的传输细节：发信商 API 前面挂着 CDN，默认的 urllib UA 会被判为 Cloudflare 1010 直接拒绝。读取器显式带 `User-Agent`；不带的话每次轮询都返回 `unknown`，看起来像发信商故障，实际是客户端被拦。
+
 回执只证明传输（L2），到此为止：不证明链接存在，不碰 `link-ledger.state`，也不构成重发许可。

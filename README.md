@@ -258,7 +258,7 @@ PYTHONPATH=$PWD python3 -m unittest discover -s tests -t . -v
 python3 -m compileall -q bdl bin tests
 ```
 
-169 offline unit and CLI tests cover schema rejection, CSV import mapping, prose
+172 offline unit and CLI tests cover schema rejection, CSV import mapping, prose
 provenance, field mapping, cadence, the observation window, templates, history
 reconciliation, the scan/auto-confirm ledger, event idempotency, the state
 projection and its two timers, form fingerprints, provider status mapping, receipt

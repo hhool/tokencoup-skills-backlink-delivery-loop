@@ -57,6 +57,7 @@ PROVIDERS: Dict[str, Dict[str, str]] = {
 STATUS_MAP: Dict[str, Dict[str, Tuple[str, str]]] = {
     "resend": {
         "sent": ("sent", "accepted by the provider, not yet a delivery"),
+        "queued": ("pending", "queued at the provider"),
         "delivered": ("delivered", ""),
         "delivery_delayed": ("pending", "provider reports a delay, still in flight"),
         "bounced": ("bounced", ""),
@@ -78,6 +79,12 @@ STATUS_MAP: Dict[str, Dict[str, Tuple[str, str]]] = {
 # Statuses the ledger accepts as an event. ``sent`` is already recorded by hand at
 # send time; ``pending`` / ``unknown`` write nothing.
 RECORDABLE = ("delivered", "bounced")
+
+# A default urllib user agent ("Python-urllib/3.x") is refused by the CDN in front
+# of the provider APIs with Cloudflare error 1010 ("blocked access based on your
+# browser's signature"). That refusal would surface as ``unknown`` forever, so the
+# reader identifies itself explicitly.
+USER_AGENT = "bdl-receipt-poll/1.0 (+https://github.com/hhool/tokencoup-skills-backlink-delivery-loop)"
 
 
 def register_provider(name: str, config: Dict[str, str], status_map: Dict[str, Tuple[str, str]]) -> None:
@@ -128,7 +135,7 @@ def default_reader(provider: str, config: Dict[str, str], api_key: str = "") -> 
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def read(url: str) -> Tuple[int, str]:
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
         if config.get("auth") == "header":
             headers[config.get("auth_header", "Authorization")] = secret
         else:

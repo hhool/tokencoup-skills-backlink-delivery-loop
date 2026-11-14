@@ -4,10 +4,13 @@ import json
 import os
 import tempfile
 import unittest
+import urllib.request
 from pathlib import Path
 
 from bdl.adapters.provider_events import (
+    USER_AGENT,
     classify_status,
+    default_reader,
     fixture_reader,
     provider_config,
     read_status,
@@ -157,6 +160,70 @@ class TestFixtureReader(unittest.TestCase):
     def test_missing_fixture_is_a_config_error(self):
         with self.assertRaises(ConfigError):
             fixture_reader(os.path.join(tempfile.gettempdir(), "no-such-fixture.jsonl"))
+
+
+class TestDefaultReader(unittest.TestCase):
+    """The reader builds a request but never opens a socket: the opener is replaced."""
+
+    def _capture(self, status=200, body='{"last_event":"delivered"}'):
+        captured = {}
+
+        class _Response:
+            def __init__(self, code, text):
+                self._code, self._text = code, text
+
+            def getcode(self):
+                return self._code
+
+            def read(self):
+                return self._text.encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class _Opener:
+            def open(self, request, timeout=None):
+                captured["headers"] = dict(request.headers)
+                captured["url"] = request.full_url
+                return _Response(status, body)
+
+        original = urllib.request.build_opener
+        urllib.request.build_opener = lambda *a, **k: _Opener()
+        self.addCleanup(setattr, urllib.request, "build_opener", original)
+        return captured
+
+    def test_sends_an_explicit_user_agent(self):
+        # A default urllib agent is refused by the provider's CDN with Cloudflare
+        # 1010, which the ledger would record as unknown forever.
+        captured = self._capture()
+        default_reader("resend", RESEND, api_key="re_test")(
+            "https://api.resend.com/emails/re_1"
+        )
+        headers = {k.lower(): v for k, v in captured["headers"].items()}
+        self.assertEqual(headers["user-agent"], USER_AGENT)
+        self.assertEqual(headers["authorization"], "Bearer re_test")
+
+    def test_postmark_uses_its_own_auth_header(self):
+        captured = self._capture()
+        default_reader("postmark", provider_config("postmark"), api_key="pm_test")(
+            "https://api.postmarkapp.com/messages/outbound/1/details"
+        )
+        headers = {k.lower(): v for k, v in captured["headers"].items()}
+        self.assertEqual(headers["x-postmark-server-token"], "pm_test")
+        self.assertNotIn("authorization", headers)
+
+    def test_missing_key_is_a_config_error(self):
+        original = os.environ.pop("BDL_PROVIDER_API_KEY", None)
+        self.addCleanup(
+            lambda: os.environ.__setitem__("BDL_PROVIDER_API_KEY", original)
+            if original is not None
+            else None
+        )
+        with self.assertRaises(ConfigError):
+            default_reader("resend", RESEND)
 
 
 if __name__ == "__main__":

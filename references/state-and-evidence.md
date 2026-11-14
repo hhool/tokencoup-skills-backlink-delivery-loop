@@ -117,5 +117,10 @@ Mapping discipline:
   never an absence. Closing a live mailbox for 180 days because an API returned 429
   is the expensive version of that mistake.
 
+One transport detail that is easy to get wrong: the provider APIs sit behind a CDN
+that refuses a default urllib user agent with Cloudflare error 1010. The reader sends
+an explicit `User-Agent`; without it every poll would return `unknown` and look like
+a provider outage rather than a client-side block.
+
 A receipt proves transport (L2) and stops there. It does not prove the link exists,
 does not touch `link-ledger.state`, and does not authorise a resend.
