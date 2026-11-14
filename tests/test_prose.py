@@ -30,6 +30,27 @@ class ProseExtractionTests(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0].state, "excluded")
 
+    def test_unblocked_page_hint_is_not_excluded(self):
+        # /blog/sound-buttons-unblocked.html contains the substring "blocked",
+        # but the row is a plain candidate. Word-boundary matching keeps the
+        # exclusion markers honest (the mashable.com false positive).
+        text = (
+            "# TODO\n\n"
+            "## Track\n\n"
+            "| Target | Landing page | Entry |\n"
+            "|---|---|---|\n"
+            "| mashable.com | /blog/sound-buttons-unblocked.html | press@mashable.com |\n"
+        )
+        contacts = parse_prose(text, "unblocked.md")
+        self.assertEqual(len(contacts), 1)
+        self.assertEqual(contacts[0].state, "candidate")
+
+    def test_exclusion_marker_needs_word_boundaries(self):
+        from bdl.adapters.prose import _has_any, EXCLUSION_MARKERS
+        self.assertFalse(_has_any("/blog/sound-buttons-unblocked.html", EXCLUSION_MARKERS))
+        self.assertTrue(_has_any("blocked by robots", EXCLUSION_MARKERS))
+        self.assertTrue(_has_any("\u522b\u518d\u56de\u5934", EXCLUSION_MARKERS))
+
     def test_placeholder_is_ambiguous(self):
         found = [c for c in self.contacts if c.target_domain == "unknown.example.com"]
         self.assertEqual(len(found), 1)

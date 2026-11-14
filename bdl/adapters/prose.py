@@ -39,7 +39,16 @@ _ENTRY_HEADERS = ("\u5165\u53e3", "\u90ae\u7bb1", "email", "entry", "contact")
 
 def _has_any(text: str, markers: Tuple[str, ...]) -> bool:
     lowered = text.lower()
-    return any(marker.lower() in lowered for marker in markers)
+    for marker in markers:
+        # ASCII markers match on word boundaries: "unblocked" must not trip
+        # "blocked", and a path fragment like /excluded-must-see must not trip
+        # "excluded". CJK has no word boundaries, so it stays a substring match.
+        if all(ord(ch) > 127 for ch in marker):
+            if marker in lowered:
+                return True
+        elif re.search(r"(?<![0-9a-z_])%s(?![0-9a-z_])" % re.escape(marker.lower()), lowered):
+            return True
+    return False
 
 
 def _clean(value: str) -> str:
